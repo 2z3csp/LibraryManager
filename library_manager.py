@@ -48,6 +48,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QAbstractItemView,
     QGroupBox,
+    QTreeWidget,
+    QTreeWidgetItem,
 )
 
 REV_RE = re.compile(
@@ -91,7 +93,12 @@ def load_registry() -> List[Dict[str, str]]:
             out = []
             for x in data:
                 if isinstance(x, dict) and "name" in x and "path" in x:
-                    out.append({"name": str(x["name"]), "path": str(x["path"])})
+                    out.append({
+                        "name": str(x["name"]),
+                        "path": str(x["path"]),
+                        "main_category": str(x.get("main_category", "")),
+                        "sub_category": str(x.get("sub_category", "")),
+                    })
             return out
         return []
     except Exception:
@@ -305,9 +312,13 @@ class RegisterDialog(QDialog):
         path_row.addWidget(self.path_btn)
 
         self.name_edit = QLineEdit()
+        self.main_category_edit = QLineEdit()
+        self.sub_category_edit = QLineEdit()
 
         form.addRow("登録フォルダパス", path_row)
         form.addRow("登録名", self.name_edit)
+        form.addRow("メインカテゴリ", self.main_category_edit)
+        form.addRow("サブカテゴリ", self.sub_category_edit)
 
         layout.addLayout(form)
 
@@ -325,8 +336,13 @@ class RegisterDialog(QDialog):
             if not self.name_edit.text().strip():
                 self.name_edit.setText(os.path.basename(path))
 
-    def get_values(self) -> Tuple[str, str]:
-        return self.name_edit.text().strip(), self.path_edit.text().strip()
+    def get_values(self) -> Tuple[str, str, str, str]:
+        return (
+            self.name_edit.text().strip(),
+            self.path_edit.text().strip(),
+            self.main_category_edit.text().strip(),
+            self.sub_category_edit.text().strip(),
+        )
 
 
 class MemoDialog(QDialog):
@@ -435,7 +451,19 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         root_layout.addWidget(splitter, 1)
 
-        # Left: registered folders table
+        # Left: category tree
+        tree_box = QWidget()
+        tree_layout = QVBoxLayout(tree_box)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.category_tree = QTreeWidget()
+        self.category_tree.setHeaderHidden(True)
+        self.category_tree.itemSelectionChanged.connect(self.on_category_tree_selected)
+        self.category_tree.itemDoubleClicked.connect(self.on_category_tree_double_clicked)
+        tree_layout.addWidget(self.category_tree)
+        splitter.addWidget(tree_box)
+
+        # Left-middle: registered folders table
         left_box = QWidget()
         left_layout = QVBoxLayout(left_box)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -497,14 +525,17 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(hist_group, 1)
 
         splitter.addWidget(right_box)
-        splitter.setSizes([520, 520, 360])
+        splitter.setSizes([260, 440, 520, 360])
 
         # State
         self.current_folder: Optional[Dict[str, str]] = None
         self.current_meta: Optional[Dict[str, Any]] = None
         self.current_file_rows: List[FileRow] = []
+        self.selected_main_category: str = ""
+        self.selected_sub_category: str = ""
 
         self.refresh_folder_table()
+        self.refresh_category_tree()
 
     # ---------- UI helpers ----------
     def info(self, msg: str):
@@ -530,10 +561,23 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.warn(f"エクスプローラーで開けませんでした: {e}")
 
+    def category_fallback(self, value: str, fallback: str) -> str:
+        return value.strip() or fallback
+
     # ---------- refresh ----------
     def refresh_folder_table(self):
         query = self.search.text().strip().lower()
-        items = [x for x in self.registry if (query in x["name"].lower())]
+        items = []
+        for x in self.registry:
+            if query not in x["name"].lower():
+                continue
+            main_cat = self.category_fallback(x.get("main_category", ""), "未分類")
+            sub_cat = self.category_fallback(x.get("sub_category", ""), "未分類")
+            if self.selected_main_category and main_cat != self.selected_main_category:
+                continue
+            if self.selected_sub_category and sub_cat != self.selected_sub_category:
+                continue
+            items.append(x)
 
         self.folders_table.setRowCount(0)
 
@@ -575,6 +619,42 @@ class MainWindow(QMainWindow):
             self.folders_table.setItem(r, 3, QTableWidgetItem(last_by))
 
         self.folders_table.repaint()
+
+    def refresh_category_tree(self):
+        self.category_tree.clear()
+        categories: Dict[str, Dict[str, List[Dict[str, str]]]] = {}
+        for item in self.registry:
+            main_cat = self.category_fallback(item.get("main_category", ""), "未分類")
+            sub_cat = self.category_fallback(item.get("sub_category", ""), "未分類")
+            categories.setdefault(main_cat, {}).setdefault(sub_cat, []).append(item)
+
+        for main_cat in sorted(categories.keys()):
+            main_item = QTreeWidgetItem([main_cat])
+            main_item.setData(0, Qt.UserRole, {"type": "main", "main": main_cat})
+            self.category_tree.addTopLevelItem(main_item)
+            for sub_cat in sorted(categories[main_cat].keys()):
+                sub_item = QTreeWidgetItem([sub_cat])
+                sub_item.setData(0, Qt.UserRole, {"type": "sub", "main": main_cat, "sub": sub_cat})
+                main_item.addChild(sub_item)
+                for folder in sorted(categories[main_cat][sub_cat], key=lambda x: x["name"].lower()):
+                    folder_item = QTreeWidgetItem([folder["name"]])
+                    folder_item.setToolTip(0, folder["path"])
+                    folder_item.setData(0, Qt.UserRole, {
+                        "type": "folder",
+                        "main": main_cat,
+                        "sub": sub_cat,
+                        "path": folder["path"],
+                    })
+                    sub_item.addChild(folder_item)
+
+        self.category_tree.expandAll()
+
+    def select_folder_in_table(self, path: str):
+        for row in range(self.folders_table.rowCount()):
+            item = self.folders_table.item(row, 0)
+            if item and item.data(Qt.UserRole) == path:
+                self.folders_table.selectRow(row)
+                break
 
     def refresh_files_table(self):
         self.files_table.setRowCount(0)
@@ -641,9 +721,9 @@ class MainWindow(QMainWindow):
         dlg = RegisterDialog(self)
         if dlg.exec() != QDialog.Accepted:
             return
-        name, path = dlg.get_values()
-        if not name or not path:
-            self.warn("登録名とフォルダパスを入力してください。")
+        name, path, main_category, sub_category = dlg.get_values()
+        if not name or not path or not main_category or not sub_category:
+            self.warn("登録名・フォルダパス・メインカテゴリ・サブカテゴリを入力してください。")
             return
         if not os.path.isdir(path):
             self.warn("フォルダが存在しません。")
@@ -658,9 +738,15 @@ class MainWindow(QMainWindow):
                 self.warn("このフォルダは既に登録されています。")
                 return
 
-        self.registry.append({"name": name, "path": path})
+        self.registry.append({
+            "name": name,
+            "path": path,
+            "main_category": main_category,
+            "sub_category": sub_category,
+        })
         save_registry(self.registry)
         self.refresh_folder_table()
+        self.refresh_category_tree()
         self.info("登録しました。")
 
     def on_folder_selected(self):
@@ -689,6 +775,34 @@ class MainWindow(QMainWindow):
         if path and os.path.isdir(path):
             self.open_in_explorer(path)
 
+    def on_category_tree_selected(self):
+        items = self.category_tree.selectedItems()
+        if not items:
+            return
+        data = items[0].data(0, Qt.UserRole) or {}
+        item_type = data.get("type")
+        if item_type == "main":
+            self.selected_main_category = data.get("main", "")
+            self.selected_sub_category = ""
+            self.refresh_folder_table()
+        elif item_type == "sub":
+            self.selected_main_category = data.get("main", "")
+            self.selected_sub_category = data.get("sub", "")
+            self.refresh_folder_table()
+        elif item_type == "folder":
+            self.selected_main_category = data.get("main", "")
+            self.selected_sub_category = data.get("sub", "")
+            self.refresh_folder_table()
+            self.select_folder_in_table(data.get("path", ""))
+
+    def on_category_tree_double_clicked(self, item: QTreeWidgetItem):
+        data = item.data(0, Qt.UserRole) or {}
+        if data.get("type") != "folder":
+            return
+        path = data.get("path")
+        if path and os.path.isdir(path):
+            self.open_in_explorer(path)
+
     def on_file_selected(self):
         idx = self.selected_file_index()
         if idx < 0:
@@ -701,6 +815,7 @@ class MainWindow(QMainWindow):
     def on_rescan(self):
         self.refresh_folder_table()
         self.refresh_files_table()
+        self.refresh_category_tree()
 
     # ---------- core operations ----------
     def _get_selected_doc(self) -> Optional[Tuple[str, str, Dict[str, Any]]]:
