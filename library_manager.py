@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QMenu,
+    QComboBox,
 )
 
 REV_RE = re.compile(
@@ -303,6 +304,8 @@ class RegisterDialog(QDialog):
         initial_path: str = "",
         initial_main_category: str = "",
         initial_sub_category: str = "",
+        main_category_options: Optional[List[str]] = None,
+        sub_category_options: Optional[List[str]] = None,
         ok_label: str = "登録",
     ):
         super().__init__(parent)
@@ -321,8 +324,15 @@ class RegisterDialog(QDialog):
         path_row.addWidget(self.path_btn)
 
         self.name_edit = QLineEdit()
-        self.main_category_edit = QLineEdit()
-        self.sub_category_edit = QLineEdit()
+        self.main_category_edit = QComboBox()
+        self.main_category_edit.setEditable(True)
+        self.sub_category_edit = QComboBox()
+        self.sub_category_edit.setEditable(True)
+
+        if main_category_options:
+            self.main_category_edit.addItems(main_category_options)
+        if sub_category_options:
+            self.sub_category_edit.addItems(sub_category_options)
 
         form.addRow("登録フォルダパス", path_row)
         form.addRow("登録名", self.name_edit)
@@ -334,9 +344,9 @@ class RegisterDialog(QDialog):
         if initial_name:
             self.name_edit.setText(initial_name)
         if initial_main_category:
-            self.main_category_edit.setText(initial_main_category)
+            self.main_category_edit.setCurrentText(initial_main_category)
         if initial_sub_category:
-            self.sub_category_edit.setText(initial_sub_category)
+            self.sub_category_edit.setCurrentText(initial_sub_category)
 
         layout.addLayout(form)
 
@@ -358,8 +368,8 @@ class RegisterDialog(QDialog):
         return (
             self.name_edit.text().strip(),
             self.path_edit.text().strip(),
-            self.main_category_edit.text().strip(),
-            self.sub_category_edit.text().strip(),
+            self.main_category_edit.currentText().strip(),
+            self.sub_category_edit.currentText().strip(),
         )
 
 
@@ -584,6 +594,17 @@ class MainWindow(QMainWindow):
     def category_fallback(self, value: str, fallback: str) -> str:
         return value.strip() or fallback
 
+    def category_options(self) -> Tuple[List[str], List[str]]:
+        main_categories = {
+            self.category_fallback(item.get("main_category", ""), "未分類")
+            for item in self.registry
+        }
+        sub_categories = {
+            self.category_fallback(item.get("sub_category", ""), "未分類")
+            for item in self.registry
+        }
+        return sorted(main_categories), sorted(sub_categories)
+
     def registry_index_by_path(self, path: str) -> int:
         for idx, item in enumerate(self.registry):
             if os.path.normcase(item["path"]) == os.path.normcase(path):
@@ -596,6 +617,7 @@ class MainWindow(QMainWindow):
             self.warn("登録情報が見つかりません。")
             return
         item = self.registry[idx]
+        main_options, sub_options = self.category_options()
 
         dlg = RegisterDialog(
             self,
@@ -603,6 +625,8 @@ class MainWindow(QMainWindow):
             initial_path=item.get("path", ""),
             initial_main_category=item.get("main_category", ""),
             initial_sub_category=item.get("sub_category", ""),
+            main_category_options=main_options,
+            sub_category_options=sub_options,
             ok_label="更新",
         )
         if dlg.exec() != QDialog.Accepted:
@@ -844,23 +868,44 @@ class MainWindow(QMainWindow):
         if not item:
             return
         data = item.data(0, Qt.UserRole) or {}
-        if data.get("type") != "folder":
-            return
-        path = data.get("path")
-        if not path:
-            return
+        item_type = data.get("type")
 
         menu = QMenu(self)
-        act_edit = menu.addAction("編集")
-        act_delete = menu.addAction("削除")
-        action = menu.exec(self.category_tree.viewport().mapToGlobal(pos))
-        if action == act_edit:
-            self.edit_registered_folder(path)
-        elif action == act_delete:
-            self.delete_registered_folder(path)
+        act_register = None
+        act_edit = None
+        act_delete = None
 
-    def on_register(self):
-        dlg = RegisterDialog(self)
+        if item_type in {"main", "sub"}:
+            act_register = menu.addAction("登録")
+        elif item_type == "folder":
+            act_edit = menu.addAction("編集")
+            act_delete = menu.addAction("削除")
+        else:
+            return
+
+        action = menu.exec(self.category_tree.viewport().mapToGlobal(pos))
+        if action == act_register:
+            initial_main = data.get("main", "")
+            initial_sub = data.get("sub", "") if item_type == "sub" else ""
+            self.open_register_dialog(initial_main_category=initial_main, initial_sub_category=initial_sub)
+        elif action == act_edit:
+            path = data.get("path")
+            if path:
+                self.edit_registered_folder(path)
+        elif action == act_delete:
+            path = data.get("path")
+            if path:
+                self.delete_registered_folder(path)
+
+    def open_register_dialog(self, initial_main_category: str = "", initial_sub_category: str = ""):
+        main_options, sub_options = self.category_options()
+        dlg = RegisterDialog(
+            self,
+            initial_main_category=initial_main_category,
+            initial_sub_category=initial_sub_category,
+            main_category_options=main_options,
+            sub_category_options=sub_options,
+        )
         if dlg.exec() != QDialog.Accepted:
             return
         name, path, main_category, sub_category = dlg.get_values()
@@ -890,6 +935,9 @@ class MainWindow(QMainWindow):
         self.refresh_folder_table()
         self.refresh_category_tree()
         self.info("登録しました。")
+
+    def on_register(self):
+        self.open_register_dialog()
 
     def on_folder_selected(self):
         idx = self.selected_folder_index()
