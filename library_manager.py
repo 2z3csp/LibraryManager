@@ -25,12 +25,13 @@ import getpass
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, List
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
     QWidget,
+    QToolBar,
     QVBoxLayout,
     QHBoxLayout,
     QSplitter,
@@ -52,6 +53,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QMenu,
     QComboBox,
+    QSpinBox,
 )
 
 REV_RE = re.compile(
@@ -82,6 +84,8 @@ def appdata_dir() -> str:
 
 
 REGISTRY_PATH = os.path.join(appdata_dir(), "registry.json")
+SETTINGS_PATH = os.path.join(appdata_dir(), "settings.json")
+DEFAULT_MEMO_TIMEOUT_MIN = 30
 
 
 def load_registry() -> List[Dict[str, str]]:
@@ -110,6 +114,27 @@ def load_registry() -> List[Dict[str, str]]:
 def save_registry(items: List[Dict[str, str]]) -> None:
     with open(REGISTRY_PATH, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
+
+
+def load_settings() -> Dict[str, Any]:
+    defaults = {"memo_timeout_min": DEFAULT_MEMO_TIMEOUT_MIN}
+    if not os.path.exists(SETTINGS_PATH):
+        return defaults
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return defaults
+        out = defaults.copy()
+        out.update(data)
+        return out
+    except Exception:
+        return defaults
+
+
+def save_settings(settings: Dict[str, Any]) -> None:
+    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=2)
 
 
 def ensure_folder_structure(folder_path: str) -> Tuple[str, str]:
@@ -208,6 +233,22 @@ def safe_list_files(folder_path: str) -> List[str]:
     except Exception:
         pass
     return files
+
+
+def is_file_locked(path: str) -> bool:
+    try:
+        with open(path, "r+b") as f:
+            if os.name == "nt":
+                import msvcrt
+
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    return True
+        return False
+    except OSError:
+        return True
 
 
 @dataclass
@@ -444,6 +485,31 @@ class ReplaceDialog(QDialog):
         return self.file_edit.text().strip(), self.memo.toPlainText().strip()
 
 
+class OptionsDialog(QDialog):
+    def __init__(self, timeout_min: int, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("オプション")
+        self.setMinimumWidth(360)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.timeout_spin = QSpinBox()
+        self.timeout_spin.setRange(1, 240)
+        self.timeout_spin.setValue(timeout_min)
+        form.addRow("メモ入力タイムアウト（分）", self.timeout_spin)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("保存")
+        buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_timeout_min(self) -> int:
+        return int(self.timeout_spin.value())
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -451,10 +517,19 @@ class MainWindow(QMainWindow):
         self.resize(1300, 760)
 
         self.registry = load_registry()
+        self.settings = load_settings()
+        self.memo_timeout_min = int(self.settings.get("memo_timeout_min", DEFAULT_MEMO_TIMEOUT_MIN))
 
         root = QWidget()
         self.setCentralWidget(root)
         root_layout = QVBoxLayout(root)
+
+        toolbar = QToolBar("ツール")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+        act_options = QAction("オプション", self)
+        act_options.triggered.connect(self.on_options)
+        toolbar.addAction(act_options)
 
         # Top controls
         top = QHBoxLayout()
@@ -569,6 +644,11 @@ class MainWindow(QMainWindow):
         self.current_file_rows: List[FileRow] = []
         self.selected_main_category: str = ""
         self.selected_sub_category: str = ""
+        self.watch_timer = None
+        self.watch_target_path = ""
+        self.watch_folder_path = ""
+        self.watch_doc_key = ""
+        self.watch_started_at: Optional[dt.datetime] = None
 
         self.refresh_folder_table()
         self.refresh_category_tree()
@@ -1013,6 +1093,15 @@ class MainWindow(QMainWindow):
         self.refresh_files_table()
         self.refresh_category_tree()
 
+    def on_options(self):
+        dlg = OptionsDialog(self.memo_timeout_min, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.memo_timeout_min = dlg.get_timeout_min()
+        self.settings["memo_timeout_min"] = self.memo_timeout_min
+        save_settings(self.settings)
+        self.info("設定を保存しました。")
+
     # ---------- core operations ----------
     def _get_selected_doc(self) -> Optional[Tuple[str, str, Dict[str, Any]]]:
         """
@@ -1057,12 +1146,6 @@ class MainWindow(QMainWindow):
         new_rev = format_rev(A, B, C, today_yyyymmdd())
         new_fn = f"{doc_base_no_ext}_{new_rev}{ext}"
 
-        subtitle = f"更新: {cur_fn}\n新規作成: {new_fn}\n（旧版は _History に退避します）"
-        dlg = MemoDialog("更新（新版作成→差し替え登録）", subtitle, "", self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        memo = dlg.get_memo()
-
         history_dir, _ = ensure_folder_structure(folder_path)
 
         cur_path = os.path.join(folder_path, cur_fn)
@@ -1099,7 +1182,7 @@ class MainWindow(QMainWindow):
                     "current_rev": new_rev,
                     "updated_at": now_iso(),
                     "updated_by": user_name(),
-                    "last_memo": memo,
+                    "last_memo": "",
                     "history": [],
                 }
             else:
@@ -1120,7 +1203,7 @@ class MainWindow(QMainWindow):
                 d["current_rev"] = new_rev
                 d["updated_at"] = now_iso()
                 d["updated_by"] = user_name()
-                d["last_memo"] = memo
+                d["last_memo"] = ""
 
             meta["documents"] = docs
             save_meta(folder_path, meta)
@@ -1134,6 +1217,7 @@ class MainWindow(QMainWindow):
                 os.startfile(new_path)  # type: ignore[attr-defined]
             except Exception:
                 pass
+            self.start_file_lock_watch(new_path, folder_path, doc_key)
 
         except Exception as e:
             self.warn(f"更新に失敗しました: {e}")
@@ -1231,6 +1315,70 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self.warn(f"差し替えに失敗しました: {e}")
+
+    def start_file_lock_watch(self, file_path: str, folder_path: str, doc_key: str):
+        if self.watch_timer is None:
+            self.watch_timer = QTimer(self)
+            self.watch_timer.setInterval(5000)
+            self.watch_timer.timeout.connect(self.on_watch_timer)
+        self.watch_timer.stop()
+        self.watch_target_path = file_path
+        self.watch_folder_path = folder_path
+        self.watch_doc_key = doc_key
+        self.watch_started_at = dt.datetime.now()
+        self.watch_timer.start()
+
+    def on_watch_timer(self):
+        if not self.watch_target_path:
+            self.watch_timer.stop()
+            return
+        if not os.path.exists(self.watch_target_path):
+            self.watch_timer.stop()
+            return
+        if self.watch_started_at is None:
+            self.watch_started_at = dt.datetime.now()
+        elapsed = (dt.datetime.now() - self.watch_started_at).total_seconds()
+        if elapsed >= self.memo_timeout_min * 60:
+            self.watch_timer.stop()
+            self.prompt_memo_timeout()
+            return
+        if not is_file_locked(self.watch_target_path):
+            self.watch_timer.stop()
+            self.prompt_memo_input()
+
+    def prompt_memo_timeout(self):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("メモ入力")
+        msg.setText("一定時間が経過しました。作業メモを入力しますか？")
+        btn_input = msg.addButton("入力する", QMessageBox.AcceptRole)
+        btn_later = msg.addButton("後で", QMessageBox.RejectRole)
+        msg.exec()
+        if msg.clickedButton() == btn_input:
+            self.prompt_memo_input()
+        elif msg.clickedButton() == btn_later:
+            self.info("後でを選択しました。作業メモは手動入力となります。")
+
+    def prompt_memo_input(self):
+        if not self.watch_folder_path or not self.watch_doc_key:
+            return
+        subtitle = f"対象ファイル: {os.path.basename(self.watch_target_path)}"
+        dlg = MemoDialog("作業メモ入力", subtitle, "", self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        memo = dlg.get_memo()
+        if not memo:
+            return
+        meta = load_meta(self.watch_folder_path)
+        docs = meta.get("documents", {})
+        doc = docs.get(self.watch_doc_key)
+        if isinstance(doc, dict):
+            doc["last_memo"] = memo
+            docs[self.watch_doc_key] = doc
+            meta["documents"] = docs
+            save_meta(self.watch_folder_path, meta)
+            self.refresh_files_table()
+            self.refresh_folder_table()
+            self.refresh_right_pane_for_doc(self.watch_doc_key)
 
 
 def main():
