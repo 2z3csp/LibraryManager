@@ -25,8 +25,8 @@ import getpass
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, List
 
-from PySide6.QtCore import Qt, QSize, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt, QSize, QTimer, Signal
+from PySide6.QtGui import QAction, QBrush, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -79,7 +79,7 @@ def user_name() -> str:
 
 def appdata_dir() -> str:
     base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    path = os.path.join(base, "TeamLibraryManagerMock")
+    path = os.path.join(base, "Libra")
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -87,6 +87,7 @@ def appdata_dir() -> str:
 REGISTRY_PATH = os.path.join(appdata_dir(), "registry.json")
 SETTINGS_PATH = os.path.join(appdata_dir(), "settings.json")
 DEFAULT_MEMO_TIMEOUT_MIN = 30
+UNCHECKED_COLOR = QColor("#C0504D")
 
 
 def load_registry() -> List[Dict[str, str]]:
@@ -118,7 +119,7 @@ def save_registry(items: List[Dict[str, str]]) -> None:
 
 
 def load_settings() -> Dict[str, Any]:
-    defaults = {"memo_timeout_min": DEFAULT_MEMO_TIMEOUT_MIN}
+    defaults = {"memo_timeout_min": DEFAULT_MEMO_TIMEOUT_MIN, "category_order": {"main": [], "sub": {}, "folder": {}}}
     if not os.path.exists(SETTINGS_PATH):
         return defaults
     try:
@@ -322,6 +323,28 @@ class FileRow:
     memo: str
 
 
+class CategoryTreeWidget(QTreeWidget):
+    order_changed = Signal()
+
+    def dropEvent(self, event):  # type: ignore[override]
+        items = self.selectedItems()
+        if not items:
+            return super().dropEvent(event)
+        dragged_parent = items[0].parent()
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        target_item = self.itemAt(pos)
+        if target_item is None:
+            if dragged_parent is not None:
+                event.ignore()
+                return
+        else:
+            if target_item.parent() is not dragged_parent:
+                event.ignore()
+                return
+        super().dropEvent(event)
+        self.order_changed.emit()
+
+
 def scan_folder(folder_path: str) -> Tuple[Dict[str, Any], List[FileRow]]:
     """
     Reads meta if exists and also scans real files.
@@ -363,6 +386,7 @@ def scan_folder(folder_path: str) -> Tuple[Dict[str, Any], List[FileRow]]:
                 "updated_by": "",
                 "last_memo": "",
                 "history": [],
+                "user_checks": {},
             }
             changed = True
         else:
@@ -371,6 +395,9 @@ def scan_folder(folder_path: str) -> Tuple[Dict[str, Any], List[FileRow]]:
             if not cur_fn or cur_fn not in files:
                 docs[doc_key]["current_file"] = fn
                 docs[doc_key]["current_rev"] = parse_rev_from_filename(fn)[2]
+                changed = True
+            if "user_checks" not in docs[doc_key] or not isinstance(docs[doc_key].get("user_checks"), dict):
+                docs[doc_key]["user_checks"] = {}
                 changed = True
 
     meta["documents"] = docs
@@ -812,7 +839,7 @@ class OptionsDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("チーム間 図書管理モック（G0）")
+        self.setWindowTitle("Libra")
         self.resize(1300, 760)
 
         self.registry = load_registry()
@@ -864,8 +891,13 @@ class MainWindow(QMainWindow):
         tree_layout = QVBoxLayout(tree_box)
         tree_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.category_tree = QTreeWidget()
+        self.category_tree = CategoryTreeWidget()
         self.category_tree.setHeaderHidden(True)
+        self.category_tree.setDragEnabled(True)
+        self.category_tree.setAcceptDrops(True)
+        self.category_tree.setDropIndicatorShown(True)
+        self.category_tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.category_tree.order_changed.connect(self.on_category_tree_order_changed)
         self.category_tree.itemSelectionChanged.connect(self.on_category_tree_selected)
         self.category_tree.itemDoubleClicked.connect(self.on_category_tree_double_clicked)
         self.category_tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -897,16 +929,19 @@ class MainWindow(QMainWindow):
         mid_layout = QVBoxLayout(mid_box)
         mid_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.files_table = QTableWidget(0, 5)
-        self.files_table.setHorizontalHeaderLabels(["ファイル（最新）", "rev", "更新日", "更新者", "DocKey"])
-        self.files_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.files_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.files_table = QTableWidget(0, 6)
+        self.files_table.setHorizontalHeaderLabels(["", "ファイル（最新）", "rev", "更新日", "更新者", "DocKey"])
+        self.files_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.files_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.files_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.files_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.files_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.files_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.files_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.files_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.files_table.itemSelectionChanged.connect(self.on_file_selected)
+        self.files_table.itemDoubleClicked.connect(self.on_file_double_clicked)
+        self.files_table.itemChanged.connect(self.on_file_check_changed)
         self.files_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.files_table.customContextMenuRequested.connect(self.on_files_table_context_menu)
 
@@ -952,6 +987,7 @@ class MainWindow(QMainWindow):
         self.watch_folder_path = ""
         self.watch_doc_key = ""
         self.watch_started_at: Optional[dt.datetime] = None
+        self.current_user = user_name()
 
         self.refresh_folder_table()
         self.refresh_category_tree()
@@ -993,6 +1029,81 @@ class MainWindow(QMainWindow):
             for item in self.registry
         }
         return sorted(main_categories), sorted(sub_categories)
+
+    def category_order(self) -> Dict[str, Any]:
+        order = self.settings.get("category_order")
+        if not isinstance(order, dict):
+            order = {"main": [], "sub": {}, "folder": {}}
+            self.settings["category_order"] = order
+        order.setdefault("main", [])
+        order.setdefault("sub", {})
+        order.setdefault("folder", {})
+        return order
+
+    def ordered_list(self, items: List[str], preferred: List[str]) -> List[str]:
+        ordered = [x for x in preferred if x in items]
+        for x in items:
+            if x not in ordered:
+                ordered.append(x)
+        return ordered
+
+    def folders_sorted_for_subcategory(self, folders: List[Dict[str, str]], order_paths: List[str]) -> List[Dict[str, str]]:
+        mapping = {f["path"]: f for f in folders}
+        ordered = []
+        for path in order_paths:
+            item = mapping.pop(path, None)
+            if item:
+                ordered.append(item)
+        ordered.extend(sorted(mapping.values(), key=lambda x: x["name"].lower()))
+        return ordered
+
+    def doc_is_checked(self, doc_info: Dict[str, Any]) -> bool:
+        checks = doc_info.get("user_checks", {})
+        if not isinstance(checks, dict):
+            return False
+        return bool(checks.get(self.current_user, False))
+
+    def update_doc_check_state(self, doc_info: Dict[str, Any], checked: bool, reset_others: bool = False) -> None:
+        checks = doc_info.get("user_checks", {})
+        if not isinstance(checks, dict):
+            checks = {}
+        if reset_others:
+            checks = {user: False for user in checks.keys()}
+        checks[self.current_user] = checked
+        doc_info["user_checks"] = checks
+
+    def mark_doc_checked(self, folder_path: str, doc_key: str, reset_others: bool = False) -> None:
+        meta = load_meta(folder_path)
+        docs = meta.get("documents", {})
+        doc_info = docs.get(doc_key)
+        if not isinstance(doc_info, dict):
+            return
+        self.update_doc_check_state(doc_info, True, reset_others=reset_others)
+        docs[doc_key] = doc_info
+        meta["documents"] = docs
+        save_meta(folder_path, meta)
+
+    def folder_has_unchecked(self, folder_path: str) -> bool:
+        if not os.path.isdir(folder_path):
+            return False
+        meta = load_meta(folder_path)
+        docs = meta.get("documents", {})
+        if not isinstance(docs, dict):
+            return False
+        for info in docs.values():
+            if not isinstance(info, dict):
+                continue
+            if not info.get("current_file"):
+                continue
+            if not self.doc_is_checked(info):
+                return True
+        return False
+
+    def set_item_unchecked_style(self, item: QTableWidgetItem, unchecked: bool) -> None:
+        if unchecked:
+            item.setForeground(QBrush(UNCHECKED_COLOR))
+        else:
+            item.setForeground(QBrush())
 
     def registry_index_by_path(self, path: str) -> int:
         for idx, item in enumerate(self.registry):
@@ -1104,6 +1215,7 @@ class MainWindow(QMainWindow):
             name = item["name"]
             path = item["path"]
             last_date = ""
+            has_unchecked = self.folder_has_unchecked(path)
 
             if os.path.isdir(path):
                 try:
@@ -1128,6 +1240,7 @@ class MainWindow(QMainWindow):
             it_name = QTableWidgetItem(name)
             it_name.setToolTip(path)
             it_name.setData(Qt.UserRole, path)
+            self.set_item_unchecked_style(it_name, has_unchecked)
 
             self.folders_table.setItem(r, 0, it_name)
             self.folders_table.setItem(r, 1, QTableWidgetItem(last_date))
@@ -1136,21 +1249,26 @@ class MainWindow(QMainWindow):
 
     def refresh_category_tree(self):
         self.category_tree.clear()
+        order = self.category_order()
         categories: Dict[str, Dict[str, List[Dict[str, str]]]] = {}
         for item in self.registry:
             main_cat = self.category_fallback(item.get("main_category", ""), "未分類")
             sub_cat = self.category_fallback(item.get("sub_category", ""), "未分類")
             categories.setdefault(main_cat, {}).setdefault(sub_cat, []).append(item)
 
-        for main_cat in sorted(categories.keys()):
+        for main_cat in self.ordered_list(list(categories.keys()), order.get("main", [])):
             main_item = QTreeWidgetItem([main_cat])
             main_item.setData(0, Qt.UserRole, {"type": "main", "main": main_cat})
             self.category_tree.addTopLevelItem(main_item)
-            for sub_cat in sorted(categories[main_cat].keys()):
+            main_has_unchecked = False
+            sub_order = order.get("sub", {}).get(main_cat, [])
+            for sub_cat in self.ordered_list(list(categories[main_cat].keys()), sub_order):
                 sub_item = QTreeWidgetItem([sub_cat])
                 sub_item.setData(0, Qt.UserRole, {"type": "sub", "main": main_cat, "sub": sub_cat})
                 main_item.addChild(sub_item)
-                for folder in sorted(categories[main_cat][sub_cat], key=lambda x: x["name"].lower()):
+                sub_has_unchecked = False
+                folder_order = order.get("folder", {}).get(main_cat, {}).get(sub_cat, [])
+                for folder in self.folders_sorted_for_subcategory(categories[main_cat][sub_cat], folder_order):
                     folder_item = QTreeWidgetItem([folder["name"]])
                     folder_item.setToolTip(0, folder["path"])
                     folder_item.setData(0, Qt.UserRole, {
@@ -1159,9 +1277,40 @@ class MainWindow(QMainWindow):
                         "sub": sub_cat,
                         "path": folder["path"],
                     })
+                    folder_unchecked = self.folder_has_unchecked(folder["path"])
+                    if folder_unchecked:
+                        sub_has_unchecked = True
+                        main_has_unchecked = True
+                        folder_item.setForeground(0, QBrush(UNCHECKED_COLOR))
                     sub_item.addChild(folder_item)
+                if sub_has_unchecked:
+                    sub_item.setForeground(0, QBrush(UNCHECKED_COLOR))
+            if main_has_unchecked:
+                main_item.setForeground(0, QBrush(UNCHECKED_COLOR))
 
         self.category_tree.expandAll()
+
+    def update_category_order_from_tree(self):
+        order = {"main": [], "sub": {}, "folder": {}}
+        for i in range(self.category_tree.topLevelItemCount()):
+            main_item = self.category_tree.topLevelItem(i)
+            main_name = main_item.text(0)
+            order["main"].append(main_name)
+            order["sub"][main_name] = []
+            order["folder"][main_name] = {}
+            for j in range(main_item.childCount()):
+                sub_item = main_item.child(j)
+                sub_name = sub_item.text(0)
+                order["sub"][main_name].append(sub_name)
+                order["folder"][main_name][sub_name] = []
+                for k in range(sub_item.childCount()):
+                    folder_item = sub_item.child(k)
+                    data = folder_item.data(0, Qt.UserRole) or {}
+                    path = data.get("path")
+                    if path:
+                        order["folder"][main_name][sub_name].append(path)
+        self.settings["category_order"] = order
+        save_settings(self.settings)
 
     def select_folder_in_table(self, path: str):
         for row in range(self.folders_table.rowCount()):
@@ -1171,16 +1320,19 @@ class MainWindow(QMainWindow):
                 break
 
     def refresh_files_table(self):
+        self.files_table.blockSignals(True)
         self.files_table.setRowCount(0)
         self.memo_view.setPlainText("")
         self.hist_table.setRowCount(0)
 
         if not self.current_folder:
+            self.files_table.blockSignals(False)
             return
 
         folder_path = self.current_folder["path"]
         if not os.path.isdir(folder_path):
             self.warn("登録フォルダが見つかりません。パスを確認してください。")
+            self.files_table.blockSignals(False)
             return
 
         meta, rows = scan_folder(folder_path)
@@ -1191,16 +1343,27 @@ class MainWindow(QMainWindow):
             r = self.files_table.rowCount()
             self.files_table.insertRow(r)
 
+            doc_info = self.current_meta.get("documents", {}).get(row.doc_key, {})
+            is_checked = self.doc_is_checked(doc_info) if isinstance(doc_info, dict) else False
+
+            it_check = QTableWidgetItem("")
+            it_check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+            it_check.setCheckState(Qt.Checked if is_checked else Qt.Unchecked)
+            it_check.setData(Qt.UserRole, row.doc_key)
+            self.files_table.setItem(r, 0, it_check)
+
             it_fn = QTableWidgetItem(row.filename)
             it_fn.setToolTip(os.path.join(folder_path, row.filename))
-            self.files_table.setItem(r, 0, it_fn)
-            self.files_table.setItem(r, 1, QTableWidgetItem(display_rev(row.rev)))
-            self.files_table.setItem(r, 2, QTableWidgetItem((row.updated_at or "").replace("T", " ")))
-            self.files_table.setItem(r, 3, QTableWidgetItem(row.updated_by or ""))
-            self.files_table.setItem(r, 4, QTableWidgetItem(row.doc_key))
+            self.set_item_unchecked_style(it_fn, not is_checked)
+            self.files_table.setItem(r, 1, it_fn)
+            self.files_table.setItem(r, 2, QTableWidgetItem(display_rev(row.rev)))
+            self.files_table.setItem(r, 3, QTableWidgetItem((row.updated_at or "").replace("T", " ")))
+            self.files_table.setItem(r, 4, QTableWidgetItem(row.updated_by or ""))
+            self.files_table.setItem(r, 5, QTableWidgetItem(row.doc_key))
 
         # hide DocKey column by default (can be useful for debugging)
-        self.files_table.setColumnHidden(4, True)
+        self.files_table.setColumnHidden(5, True)
+        self.files_table.blockSignals(False)
 
     def refresh_right_pane_for_doc(self, doc_key: str):
         self.memo_view.setPlainText("")
@@ -1233,6 +1396,10 @@ class MainWindow(QMainWindow):
             self.hist_table.setItem(r, 2, QTableWidgetItem(h.get("memo", "") or ""))
 
     # ---------- events ----------
+    def on_category_tree_order_changed(self):
+        self.update_category_order_from_tree()
+        self.refresh_category_tree()
+
     def on_folders_table_context_menu(self, pos):
         item = self.folders_table.itemAt(pos)
         if not item:
@@ -1311,6 +1478,48 @@ class MainWindow(QMainWindow):
             self.on_rollback()
         elif action == act_history_clear:
             self.on_history_clear()
+
+    def on_file_double_clicked(self, item: QTableWidgetItem):
+        row = item.row()
+        if row < 0 or row >= len(self.current_file_rows):
+            return
+        if not self.current_folder:
+            return
+        file_path = os.path.join(self.current_folder["path"], self.current_file_rows[row].filename)
+        if os.path.exists(file_path):
+            try:
+                os.startfile(file_path)  # type: ignore[attr-defined]
+            except Exception as e:
+                self.warn(f"ファイルを開けませんでした: {e}")
+                return
+            self.mark_doc_checked(self.current_folder["path"], self.current_file_rows[row].doc_key)
+            self.refresh_files_table()
+            self.refresh_folder_table()
+            self.refresh_category_tree()
+
+    def on_file_check_changed(self, item: QTableWidgetItem):
+        if item.column() != 0:
+            return
+        if not self.current_folder or not self.current_meta:
+            return
+        doc_key = item.data(Qt.UserRole)
+        if not doc_key:
+            return
+        checked = item.checkState() == Qt.Checked
+        meta = load_meta(self.current_folder["path"])
+        docs = meta.get("documents", {})
+        doc_info = docs.get(doc_key)
+        if not isinstance(doc_info, dict):
+            return
+        self.update_doc_check_state(doc_info, checked, reset_others=False)
+        docs[doc_key] = doc_info
+        meta["documents"] = docs
+        save_meta(self.current_folder["path"], meta)
+        name_item = self.files_table.item(item.row(), 1)
+        if name_item:
+            self.set_item_unchecked_style(name_item, not checked)
+        self.refresh_folder_table()
+        self.refresh_category_tree()
 
     def open_register_dialog(self, initial_main_category: str = "", initial_sub_category: str = ""):
         main_options, sub_options = self.category_options()
@@ -1517,6 +1726,7 @@ class MainWindow(QMainWindow):
                     "updated_by": user_name(),
                     "last_memo": "",
                     "history": [],
+                    "user_checks": {self.current_user: True},
                 }
             else:
                 d = docs[doc_key]
@@ -1537,6 +1747,7 @@ class MainWindow(QMainWindow):
                 d["updated_at"] = now_iso()
                 d["updated_by"] = user_name()
                 d["last_memo"] = ""
+                self.update_doc_check_state(d, True, reset_others=True)
 
             meta["documents"] = docs
             save_meta(folder_path, meta)
@@ -1544,6 +1755,7 @@ class MainWindow(QMainWindow):
             # Refresh
             self.refresh_files_table()
             self.refresh_folder_table()
+            self.refresh_category_tree()
 
             # Open the new file for convenience
             try:
@@ -1619,6 +1831,7 @@ class MainWindow(QMainWindow):
                 "updated_by": user_name(),
                 "last_memo": memo,
                 "history": [],
+                "user_checks": {self.current_user: True},
             })
 
             prev_entry = {
@@ -1637,6 +1850,7 @@ class MainWindow(QMainWindow):
             d["updated_at"] = now_iso()
             d["updated_by"] = user_name()
             d["last_memo"] = memo
+            self.update_doc_check_state(d, True, reset_others=True)
 
             docs[doc_key] = d
             meta["documents"] = docs
@@ -1645,6 +1859,7 @@ class MainWindow(QMainWindow):
             # Refresh
             self.refresh_files_table()
             self.refresh_folder_table()
+            self.refresh_category_tree()
 
         except Exception as e:
             self.warn(f"差し替えに失敗しました: {e}")
@@ -1722,6 +1937,7 @@ class MainWindow(QMainWindow):
                 "updated_by": user_name(),
                 "last_memo": "",
                 "history": [],
+                "user_checks": {self.current_user: True},
             })
 
             prev_entry = {
@@ -1741,6 +1957,7 @@ class MainWindow(QMainWindow):
             d["updated_by"] = user_name()
             rollback_rev = history_entry.get("rev", "")
             d["last_memo"] = f"差し戻し: {display_rev(rollback_rev)}"
+            self.update_doc_check_state(d, True, reset_others=True)
 
             docs[doc_key] = d
             meta["documents"] = docs
@@ -1748,6 +1965,7 @@ class MainWindow(QMainWindow):
 
             self.refresh_files_table()
             self.refresh_folder_table()
+            self.refresh_category_tree()
             self.refresh_right_pane_for_doc(doc_key)
 
         except Exception as e:
