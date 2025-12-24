@@ -802,6 +802,36 @@ class MemoDialog(QDialog):
         return self.memo.toPlainText().strip()
 
 
+class DropLineEdit(QLineEdit):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):  # noqa: N802
+        urls = event.mimeData().urls()
+        if not urls:
+            event.ignore()
+            return
+        path = urls[0].toLocalFile()
+        if not path:
+            event.ignore()
+            return
+        self.setText(path)
+        event.acceptProposedAction()
+
+
 class ReplaceDialog(QDialog):
     def __init__(self, target_filename: str, parent: QWidget | None = None):
         super().__init__(parent)
@@ -813,7 +843,7 @@ class ReplaceDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"差し替え対象（現行）: {target_filename}"))
 
-        self.file_edit = QLineEdit()
+        self.file_edit = DropLineEdit()
         self.file_btn = QPushButton("ファイル選択...")
         self.file_btn.clicked.connect(self.pick_file)
 
