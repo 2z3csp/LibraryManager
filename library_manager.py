@@ -203,6 +203,12 @@ def format_rev(A: int, B: int, C: int, yyyymmdd: str) -> str:
     return f"rev{A}.{B}.{C}_{yyyymmdd}"
 
 
+def display_rev(rev: str) -> str:
+    if not rev:
+        return ""
+    return rev.split("_", 1)[0]
+
+
 def format_version_numbers(A: int, B: int, C: int) -> str:
     return f"{A}.{B}.{C}"
 
@@ -219,14 +225,14 @@ def parse_rev_numbers(current_rev: str) -> Optional[Tuple[int, int, int]]:
 def next_rev_from_current(current_rev: str) -> Tuple[int, int, int]:
     """
     current_rev like 'rev1.2.3_20251223' or ''
-    Returns (A,B,C) for the next revision, defaulting to (1,0,1) if none.
-    Behavior: keep A,B; increment C by 1. If no current_rev, start A=1,B=0,C=1.
+    Returns (A,B,C) for the next revision, defaulting to (0,0,1) if none.
+    Behavior: keep A,B; increment C by 1. If no current_rev, start A=0,B=0,C=1.
     """
     if not current_rev:
-        return 1, 0, 1
+        return 0, 0, 1
     m = re.match(r"^rev(\d+)\.(\d+)\.(\d+)_\d{8}$", current_rev, re.IGNORECASE)
     if not m:
-        return 1, 0, 1
+        return 0, 0, 1
     A, B, C = int(m.group(1)), int(m.group(2)), int(m.group(3))
     return A, B, C + 1
 
@@ -237,7 +243,7 @@ def next_rev_with_bump(current_rev: str, bump: str) -> Tuple[int, int, int]:
     """
     parsed = parse_rev_numbers(current_rev)
     if parsed is None:
-        A, B, C = 1, 0, 0
+        A, B, C = 0, 0, 0
     else:
         A, B, C = parsed
     if bump == "major":
@@ -1188,7 +1194,7 @@ class MainWindow(QMainWindow):
             it_fn = QTableWidgetItem(row.filename)
             it_fn.setToolTip(os.path.join(folder_path, row.filename))
             self.files_table.setItem(r, 0, it_fn)
-            self.files_table.setItem(r, 1, QTableWidgetItem(row.rev))
+            self.files_table.setItem(r, 1, QTableWidgetItem(display_rev(row.rev)))
             self.files_table.setItem(r, 2, QTableWidgetItem((row.updated_at or "").replace("T", " ")))
             self.files_table.setItem(r, 3, QTableWidgetItem(row.updated_by or ""))
             self.files_table.setItem(r, 4, QTableWidgetItem(row.doc_key))
@@ -1733,7 +1739,8 @@ class MainWindow(QMainWindow):
             d["current_rev"] = new_rev
             d["updated_at"] = now_iso()
             d["updated_by"] = user_name()
-            d["last_memo"] = ""
+            rollback_rev = history_entry.get("rev", "")
+            d["last_memo"] = f"差し戻し: {display_rev(rollback_rev)}"
 
             docs[doc_key] = d
             meta["documents"] = docs
