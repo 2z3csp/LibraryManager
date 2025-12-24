@@ -86,6 +86,7 @@ def appdata_dir() -> str:
 
 REGISTRY_PATH = os.path.join(appdata_dir(), "registry.json")
 SETTINGS_PATH = os.path.join(appdata_dir(), "settings.json")
+USER_CHECKS_PATH = os.path.join(appdata_dir(), "user_checks.json")
 DEFAULT_MEMO_TIMEOUT_MIN = 30
 UNCHECKED_COLOR = QColor("#C0504D")
 
@@ -137,6 +138,26 @@ def load_settings() -> Dict[str, Any]:
 def save_settings(settings: Dict[str, Any]) -> None:
     with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(settings, f, ensure_ascii=False, indent=2)
+
+
+def load_user_checks() -> Dict[str, Dict[str, bool]]:
+    if not os.path.exists(USER_CHECKS_PATH):
+        return {}
+    try:
+        with open(USER_CHECKS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("folders"), dict):
+            return data["folders"]
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if isinstance(v, dict)}
+    except Exception:
+        return {}
+    return {}
+
+
+def save_user_checks(checks: Dict[str, Dict[str, bool]]) -> None:
+    with open(USER_CHECKS_PATH, "w", encoding="utf-8") as f:
+        json.dump({"folders": checks}, f, ensure_ascii=False, indent=2)
 
 
 def ensure_folder_structure(folder_path: str) -> Tuple[str, str]:
@@ -386,7 +407,6 @@ def scan_folder(folder_path: str) -> Tuple[Dict[str, Any], List[FileRow]]:
                 "updated_by": "",
                 "last_memo": "",
                 "history": [],
-                "user_checks": {},
             }
             changed = True
         else:
@@ -395,9 +415,6 @@ def scan_folder(folder_path: str) -> Tuple[Dict[str, Any], List[FileRow]]:
             if not cur_fn or cur_fn not in files:
                 docs[doc_key]["current_file"] = fn
                 docs[doc_key]["current_rev"] = parse_rev_from_filename(fn)[2]
-                changed = True
-            if "user_checks" not in docs[doc_key] or not isinstance(docs[doc_key].get("user_checks"), dict):
-                docs[doc_key]["user_checks"] = {}
                 changed = True
 
     meta["documents"] = docs
@@ -844,6 +861,7 @@ class MainWindow(QMainWindow):
 
         self.registry = load_registry()
         self.settings = load_settings()
+        self.user_checks = load_user_checks()
         self.memo_timeout_min = int(self.settings.get("memo_timeout_min", DEFAULT_MEMO_TIMEOUT_MIN))
 
         root = QWidget()
@@ -1057,31 +1075,32 @@ class MainWindow(QMainWindow):
         ordered.extend(sorted(mapping.values(), key=lambda x: x["name"].lower()))
         return ordered
 
-    def doc_is_checked(self, doc_info: Dict[str, Any]) -> bool:
-        checks = doc_info.get("user_checks", {})
-        if not isinstance(checks, dict):
-            return False
-        return bool(checks.get(self.current_user, False))
+    def folder_key(self, folder_path: str) -> str:
+        return os.path.normcase(os.path.abspath(folder_path))
 
-    def update_doc_check_state(self, doc_info: Dict[str, Any], checked: bool, reset_others: bool = False) -> None:
-        checks = doc_info.get("user_checks", {})
-        if not isinstance(checks, dict):
-            checks = {}
-        if reset_others:
-            checks = {user: False for user in checks.keys()}
-        checks[self.current_user] = checked
-        doc_info["user_checks"] = checks
+    def doc_is_checked(self, folder_path: str, doc_key: str, doc_info: Optional[Dict[str, Any]] = None) -> bool:
+        folder_key = self.folder_key(folder_path)
+        folder_checks = self.user_checks.get(folder_key, {})
+        if doc_key in folder_checks:
+            return bool(folder_checks.get(doc_key))
+        if doc_info and isinstance(doc_info.get("user_checks"), dict):
+            legacy_checked = bool(doc_info["user_checks"].get(self.current_user, False))
+            if legacy_checked:
+                self.set_doc_checked(folder_path, doc_key, True)
+            return legacy_checked
+        return False
 
-    def mark_doc_checked(self, folder_path: str, doc_key: str, reset_others: bool = False) -> None:
-        meta = load_meta(folder_path)
-        docs = meta.get("documents", {})
-        doc_info = docs.get(doc_key)
-        if not isinstance(doc_info, dict):
-            return
-        self.update_doc_check_state(doc_info, True, reset_others=reset_others)
-        docs[doc_key] = doc_info
-        meta["documents"] = docs
-        save_meta(folder_path, meta)
+    def set_doc_checked(self, folder_path: str, doc_key: str, checked: bool) -> None:
+        folder_key = self.folder_key(folder_path)
+        folder_checks = self.user_checks.get(folder_key, {})
+        if not isinstance(folder_checks, dict):
+            folder_checks = {}
+        folder_checks[doc_key] = checked
+        self.user_checks[folder_key] = folder_checks
+        save_user_checks(self.user_checks)
+
+    def mark_doc_checked(self, folder_path: str, doc_key: str) -> None:
+        self.set_doc_checked(folder_path, doc_key, True)
 
     def folder_has_unchecked(self, folder_path: str) -> bool:
         if not os.path.isdir(folder_path):
@@ -1090,12 +1109,12 @@ class MainWindow(QMainWindow):
         docs = meta.get("documents", {})
         if not isinstance(docs, dict):
             return False
-        for info in docs.values():
+        for doc_key, info in docs.items():
             if not isinstance(info, dict):
                 continue
             if not info.get("current_file"):
                 continue
-            if not self.doc_is_checked(info):
+            if not self.doc_is_checked(folder_path, doc_key, info):
                 return True
         return False
 
@@ -1319,8 +1338,20 @@ class MainWindow(QMainWindow):
                 self.folders_table.selectRow(row)
                 break
 
+    def select_doc_key(self, doc_key: str):
+        for row in range(self.files_table.rowCount()):
+            item = self.files_table.item(row, 5)
+            if item and item.text() == doc_key:
+                self.files_table.selectRow(row)
+                self.refresh_right_pane_for_doc(doc_key)
+                break
+
     def refresh_files_table(self):
         self.files_table.blockSignals(True)
+        selected_doc_key = None
+        selected_index = self.selected_file_index()
+        if 0 <= selected_index < len(self.current_file_rows):
+            selected_doc_key = self.current_file_rows[selected_index].doc_key
         self.files_table.setRowCount(0)
         self.memo_view.setPlainText("")
         self.hist_table.setRowCount(0)
@@ -1344,7 +1375,7 @@ class MainWindow(QMainWindow):
             self.files_table.insertRow(r)
 
             doc_info = self.current_meta.get("documents", {}).get(row.doc_key, {})
-            is_checked = self.doc_is_checked(doc_info) if isinstance(doc_info, dict) else False
+            is_checked = self.doc_is_checked(folder_path, row.doc_key, doc_info if isinstance(doc_info, dict) else None)
 
             it_check = QTableWidgetItem("")
             it_check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
@@ -1363,6 +1394,8 @@ class MainWindow(QMainWindow):
 
         # hide DocKey column by default (can be useful for debugging)
         self.files_table.setColumnHidden(5, True)
+        if selected_doc_key:
+            self.select_doc_key(selected_doc_key)
         self.files_table.blockSignals(False)
 
     def refresh_right_pane_for_doc(self, doc_key: str):
@@ -1500,21 +1533,13 @@ class MainWindow(QMainWindow):
     def on_file_check_changed(self, item: QTableWidgetItem):
         if item.column() != 0:
             return
-        if not self.current_folder or not self.current_meta:
+        if not self.current_folder:
             return
         doc_key = item.data(Qt.UserRole)
         if not doc_key:
             return
         checked = item.checkState() == Qt.Checked
-        meta = load_meta(self.current_folder["path"])
-        docs = meta.get("documents", {})
-        doc_info = docs.get(doc_key)
-        if not isinstance(doc_info, dict):
-            return
-        self.update_doc_check_state(doc_info, checked, reset_others=False)
-        docs[doc_key] = doc_info
-        meta["documents"] = docs
-        save_meta(self.current_folder["path"], meta)
+        self.set_doc_checked(self.current_folder["path"], doc_key, checked)
         name_item = self.files_table.item(item.row(), 1)
         if name_item:
             self.set_item_unchecked_style(name_item, not checked)
@@ -1726,7 +1751,6 @@ class MainWindow(QMainWindow):
                     "updated_by": user_name(),
                     "last_memo": "",
                     "history": [],
-                    "user_checks": {self.current_user: True},
                 }
             else:
                 d = docs[doc_key]
@@ -1747,10 +1771,10 @@ class MainWindow(QMainWindow):
                 d["updated_at"] = now_iso()
                 d["updated_by"] = user_name()
                 d["last_memo"] = ""
-                self.update_doc_check_state(d, True, reset_others=True)
 
             meta["documents"] = docs
             save_meta(folder_path, meta)
+            self.mark_doc_checked(folder_path, doc_key)
 
             # Refresh
             self.refresh_files_table()
@@ -1831,7 +1855,6 @@ class MainWindow(QMainWindow):
                 "updated_by": user_name(),
                 "last_memo": memo,
                 "history": [],
-                "user_checks": {self.current_user: True},
             })
 
             prev_entry = {
@@ -1850,11 +1873,11 @@ class MainWindow(QMainWindow):
             d["updated_at"] = now_iso()
             d["updated_by"] = user_name()
             d["last_memo"] = memo
-            self.update_doc_check_state(d, True, reset_others=True)
 
             docs[doc_key] = d
             meta["documents"] = docs
             save_meta(folder_path, meta)
+            self.mark_doc_checked(folder_path, doc_key)
 
             # Refresh
             self.refresh_files_table()
@@ -1937,7 +1960,6 @@ class MainWindow(QMainWindow):
                 "updated_by": user_name(),
                 "last_memo": "",
                 "history": [],
-                "user_checks": {self.current_user: True},
             })
 
             prev_entry = {
@@ -1957,11 +1979,11 @@ class MainWindow(QMainWindow):
             d["updated_by"] = user_name()
             rollback_rev = history_entry.get("rev", "")
             d["last_memo"] = f"差し戻し: {display_rev(rollback_rev)}"
-            self.update_doc_check_state(d, True, reset_others=True)
 
             docs[doc_key] = d
             meta["documents"] = docs
             save_meta(folder_path, meta)
+            self.mark_doc_checked(folder_path, doc_key)
 
             self.refresh_files_table()
             self.refresh_folder_table()
