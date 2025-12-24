@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QComboBox,
     QSpinBox,
+    QRadioButton,
 )
 
 REV_RE = re.compile(
@@ -202,19 +203,79 @@ def format_rev(A: int, B: int, C: int, yyyymmdd: str) -> str:
     return f"rev{A}.{B}.{C}_{yyyymmdd}"
 
 
+def display_rev(rev: str) -> str:
+    if not rev:
+        return ""
+    return rev.split("_", 1)[0]
+
+
+def format_version_numbers(A: int, B: int, C: int) -> str:
+    return f"{A}.{B}.{C}"
+
+
+def parse_rev_numbers(current_rev: str) -> Optional[Tuple[int, int, int]]:
+    if not current_rev:
+        return None
+    m = re.match(r"^rev(\d+)\.(\d+)\.(\d+)_\d{8}$", current_rev, re.IGNORECASE)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
 def next_rev_from_current(current_rev: str) -> Tuple[int, int, int]:
     """
     current_rev like 'rev1.2.3_20251223' or ''
-    Returns (A,B,C) for the next revision, defaulting to (1,0,1) if none.
-    Behavior: keep A,B; increment C by 1. If no current_rev, start A=1,B=0,C=1.
+    Returns (A,B,C) for the next revision, defaulting to (0,0,1) if none.
+    Behavior: keep A,B; increment C by 1. If no current_rev, start A=0,B=0,C=1.
     """
     if not current_rev:
-        return 1, 0, 1
+        return 0, 0, 1
     m = re.match(r"^rev(\d+)\.(\d+)\.(\d+)_\d{8}$", current_rev, re.IGNORECASE)
     if not m:
-        return 1, 0, 1
+        return 0, 0, 1
     A, B, C = int(m.group(1)), int(m.group(2)), int(m.group(3))
     return A, B, C + 1
+
+
+def next_rev_with_bump(current_rev: str, bump: str) -> Tuple[int, int, int]:
+    """
+    bump: "major" | "minor" | "patch"
+    """
+    parsed = parse_rev_numbers(current_rev)
+    if parsed is None:
+        A, B, C = 0, 0, 0
+    else:
+        A, B, C = parsed
+    if bump == "major":
+        return A + 1, 0, 0
+    if bump == "minor":
+        return A, B + 1, 0
+    return A, B, C + 1
+
+
+def parse_rev_from_rev_string(rev_str: str) -> Optional[Tuple[int, int, int]]:
+    m = re.match(r"^rev(\d+)\.(\d+)\.(\d+)_\d{8}$", rev_str, re.IGNORECASE)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def should_select_patch(latest: Tuple[int, int, int], candidate: Tuple[int, int, int]) -> bool:
+    latest_A, latest_B, _latest_C = latest
+    A, B, C = candidate
+    if (A, B) == (latest_A, latest_B):
+        return False
+    if A < latest_A or (A == latest_A and B < latest_B):
+        return C > 0
+    return False
+
+
+def should_select_minor(latest: Tuple[int, int, int], candidate: Tuple[int, int, int]) -> bool:
+    latest_A, _latest_B, _latest_C = latest
+    A, B, _C = candidate
+    if A < latest_A:
+        return B > 0
+    return False
 
 
 def safe_list_files(folder_path: str) -> List[str]:
@@ -420,6 +481,244 @@ class RegisterDialog(QDialog):
         )
 
 
+class VersionSelectDialog(QDialog):
+    def __init__(self, current_rev: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("バージョン管理（G2）")
+        self.setMinimumWidth(420)
+
+        self.current_rev = current_rev
+        self.current_version = parse_rev_numbers(current_rev)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        current_text = "未設定"
+        if self.current_version:
+            current_text = format_version_numbers(*self.current_version)
+        self.current_label = QLabel(current_text)
+
+        self.next_label = QLabel("")
+
+        form.addRow("ファイルのバージョン", self.current_label)
+        form.addRow("作られるファイルのバージョン", self.next_label)
+        layout.addLayout(form)
+
+        self.bump_group = QGroupBox("バージョンの選択")
+        bump_layout = QVBoxLayout(self.bump_group)
+        self.radio_major = QRadioButton("メジャーバージョン：客先提示時に更新")
+        self.radio_minor = QRadioButton("マイナーバージョン：社内・社外提示時に更新")
+        self.radio_patch = QRadioButton("パッチバージョン：編集時に更新")
+        self.radio_patch.setChecked(True)
+        bump_layout.addWidget(self.radio_major)
+        bump_layout.addWidget(self.radio_minor)
+        bump_layout.addWidget(self.radio_patch)
+        layout.addWidget(self.bump_group)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setText("OK")
+        self.buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+        self.radio_major.toggled.connect(self.update_next_version)
+        self.radio_minor.toggled.connect(self.update_next_version)
+        self.radio_patch.toggled.connect(self.update_next_version)
+        self.update_next_version()
+
+    def selected_bump(self) -> str:
+        if self.radio_major.isChecked():
+            return "major"
+        if self.radio_minor.isChecked():
+            return "minor"
+        return "patch"
+
+    def update_next_version(self):
+        bump = self.selected_bump()
+        next_rev = next_rev_with_bump(self.current_rev, bump)
+        self.next_label.setText(format_version_numbers(*next_rev))
+
+    def selected_next_version(self) -> Tuple[int, int, int]:
+        return next_rev_with_bump(self.current_rev, self.selected_bump())
+
+
+class HistoryClearDialog(QDialog):
+    def __init__(self, history_items: List[Dict[str, Any]], current_rev: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("History Clear")
+        self.setMinimumWidth(560)
+        self.history_items = history_items
+        self.current_rev = current_rev
+
+        layout = QVBoxLayout(self)
+
+        current_text = "未設定"
+        current_version = parse_rev_numbers(current_rev)
+        if current_version:
+            current_text = format_version_numbers(*current_version)
+        layout.addWidget(QLabel(f"現在のバージョン: {current_text}"))
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["選択", "rev", "ファイル"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.table)
+
+        btn_row = QHBoxLayout()
+        self.btn_patch = QPushButton("パッチ削除")
+        self.btn_minor = QPushButton("マイナー削除")
+        self.btn_delete = QPushButton("削除")
+        self.btn_close = QPushButton("閉じる")
+        btn_row.addWidget(self.btn_patch)
+        btn_row.addWidget(self.btn_minor)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_delete)
+        btn_row.addWidget(self.btn_close)
+        layout.addLayout(btn_row)
+
+        self.btn_patch.clicked.connect(self.select_patch_versions)
+        self.btn_minor.clicked.connect(self.select_minor_versions)
+        self.btn_delete.clicked.connect(self.accept)
+        self.btn_close.clicked.connect(self.reject)
+
+        self.populate_table()
+
+    def populate_table(self):
+        self.table.setRowCount(0)
+        seen = set()
+        for item in self.history_items:
+            key = (item.get("file", ""), item.get("rev", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            check_item = QTableWidgetItem("")
+            check_item.setCheckState(Qt.Unchecked)
+            check_item.setData(Qt.UserRole, item)
+            rev_item = QTableWidgetItem(item.get("rev", ""))
+            file_item = QTableWidgetItem(item.get("file", ""))
+            self.table.setItem(r, 0, check_item)
+            self.table.setItem(r, 1, rev_item)
+            self.table.setItem(r, 2, file_item)
+
+    def selected_items(self) -> List[Dict[str, Any]]:
+        selected = []
+        for r in range(self.table.rowCount()):
+            check_item = self.table.item(r, 0)
+            if check_item and check_item.checkState() == Qt.Checked:
+                data = check_item.data(Qt.UserRole)
+                if isinstance(data, dict):
+                    selected.append(data)
+        return selected
+
+    def latest_version_tuple(self) -> Optional[Tuple[int, int, int]]:
+        return parse_rev_numbers(self.current_rev)
+
+    def select_patch_versions(self):
+        latest = self.latest_version_tuple()
+        if not latest:
+            return
+        for r in range(self.table.rowCount()):
+            check_item = self.table.item(r, 0)
+            if not check_item:
+                continue
+            data = check_item.data(Qt.UserRole)
+            if not isinstance(data, dict):
+                continue
+            rev = data.get("rev", "")
+            candidate = parse_rev_from_rev_string(rev)
+            if not candidate:
+                check_item.setCheckState(Qt.Unchecked)
+                continue
+            if should_select_patch(latest, candidate):
+                check_item.setCheckState(Qt.Checked)
+            else:
+                check_item.setCheckState(Qt.Unchecked)
+
+    def select_minor_versions(self):
+        latest = self.latest_version_tuple()
+        if not latest:
+            return
+        for r in range(self.table.rowCount()):
+            check_item = self.table.item(r, 0)
+            if not check_item:
+                continue
+            data = check_item.data(Qt.UserRole)
+            if not isinstance(data, dict):
+                continue
+            rev = data.get("rev", "")
+            candidate = parse_rev_from_rev_string(rev)
+            if not candidate:
+                check_item.setCheckState(Qt.Unchecked)
+                continue
+            if should_select_minor(latest, candidate):
+                check_item.setCheckState(Qt.Checked)
+            else:
+                check_item.setCheckState(Qt.Unchecked)
+
+
+class HistorySelectDialog(QDialog):
+    def __init__(self, history_items: List[Dict[str, Any]], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("差し戻し")
+        self.setMinimumWidth(520)
+        self.history_items = history_items
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("差し戻す履歴を選択してください。"))
+
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["rev", "ファイル"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.table)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("差し戻し")
+        buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.populate_table()
+
+    def populate_table(self):
+        self.table.setRowCount(0)
+        seen = set()
+        for item in self.history_items:
+            key = (item.get("file", ""), item.get("rev", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            rev_item = QTableWidgetItem(item.get("rev", ""))
+            rev_item.setData(Qt.UserRole, item)
+            file_item = QTableWidgetItem(item.get("file", ""))
+            self.table.setItem(r, 0, rev_item)
+            self.table.setItem(r, 1, file_item)
+
+    def selected_item(self) -> Optional[Dict[str, Any]]:
+        sel = self.table.selectionModel().selectedRows()
+        if not sel:
+            return None
+        row = sel[0].row()
+        item = self.table.item(row, 0)
+        if not item:
+            return None
+        data = item.data(Qt.UserRole)
+        if isinstance(data, dict):
+            return data
+        return None
+
+
 class MemoDialog(QDialog):
     def __init__(self, title: str, subtitle: str, default_memo: str = "", parent: QWidget | None = None):
         super().__init__(parent)
@@ -608,6 +907,8 @@ class MainWindow(QMainWindow):
         self.files_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.files_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.files_table.itemSelectionChanged.connect(self.on_file_selected)
+        self.files_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.files_table.customContextMenuRequested.connect(self.on_files_table_context_menu)
 
         mid_layout.addWidget(self.files_table)
         splitter.addWidget(mid_box)
@@ -632,6 +933,8 @@ class MainWindow(QMainWindow):
         self.hist_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.hist_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.hist_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.hist_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.hist_table.setSelectionMode(QAbstractItemView.SingleSelection)
         hist_layout.addWidget(self.hist_table)
         right_layout.addWidget(hist_group, 1)
 
@@ -891,7 +1194,7 @@ class MainWindow(QMainWindow):
             it_fn = QTableWidgetItem(row.filename)
             it_fn.setToolTip(os.path.join(folder_path, row.filename))
             self.files_table.setItem(r, 0, it_fn)
-            self.files_table.setItem(r, 1, QTableWidgetItem(row.rev))
+            self.files_table.setItem(r, 1, QTableWidgetItem(display_rev(row.rev)))
             self.files_table.setItem(r, 2, QTableWidgetItem((row.updated_at or "").replace("T", " ")))
             self.files_table.setItem(r, 3, QTableWidgetItem(row.updated_by or ""))
             self.files_table.setItem(r, 4, QTableWidgetItem(row.doc_key))
@@ -923,7 +1226,9 @@ class MainWindow(QMainWindow):
         for h in items:
             r = self.hist_table.rowCount()
             self.hist_table.insertRow(r)
-            self.hist_table.setItem(r, 0, QTableWidgetItem((h.get("updated_at", "") or "").replace("T", " ")))
+            it_updated = QTableWidgetItem((h.get("updated_at", "") or "").replace("T", " "))
+            it_updated.setData(Qt.UserRole, h)
+            self.hist_table.setItem(r, 0, it_updated)
             self.hist_table.setItem(r, 1, QTableWidgetItem(h.get("updated_by", "") or ""))
             self.hist_table.setItem(r, 2, QTableWidgetItem(h.get("memo", "") or ""))
 
@@ -982,6 +1287,30 @@ class MainWindow(QMainWindow):
             path = data.get("path")
             if path:
                 self.delete_registered_folder(path)
+
+    def on_files_table_context_menu(self, pos):
+        item = self.files_table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        if row < 0 or row >= len(self.current_file_rows):
+            return
+        self.files_table.selectRow(row)
+
+        menu = QMenu(self)
+        act_update = menu.addAction("更新")
+        act_replace = menu.addAction("差し替え")
+        act_rollback = menu.addAction("差し戻し")
+        act_history_clear = menu.addAction("History Clear")
+        action = menu.exec(self.files_table.viewport().mapToGlobal(pos))
+        if action == act_update:
+            self.on_update()
+        elif action == act_replace:
+            self.on_replace()
+        elif action == act_rollback:
+            self.on_rollback()
+        elif action == act_history_clear:
+            self.on_history_clear()
 
     def open_register_dialog(self, initial_main_category: str = "", initial_sub_category: str = ""):
         main_options, sub_options = self.category_options()
@@ -1137,12 +1466,16 @@ class MainWindow(QMainWindow):
             self.warn("現行ファイルが不明です。")
             return
 
-        base_name, ext = split_name_ext(cur_fn)
-        doc_base, ver_tuple, _rev_str = parse_rev_from_filename(cur_fn)
+        version_dialog = VersionSelectDialog(cur_rev, self)
+        if version_dialog.exec() != QDialog.Accepted:
+            return
+
+        _base_name, ext = split_name_ext(cur_fn)
+        doc_base, _ver_tuple, _rev_str = parse_rev_from_filename(cur_fn)
         # doc_base includes ext; we want base without ext for naming
         doc_base_no_ext, _ = split_name_ext(doc_base)
 
-        A, B, C = next_rev_from_current(cur_rev)
+        A, B, C = version_dialog.selected_next_version()
         new_rev = format_rev(A, B, C, today_yyyymmdd())
         new_fn = f"{doc_base_no_ext}_{new_rev}{ext}"
 
@@ -1315,6 +1648,159 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self.warn(f"差し替えに失敗しました: {e}")
+
+    def on_rollback(self):
+        sel = self._get_selected_doc()
+        if not sel:
+            return
+        folder_path, doc_key, info = sel
+
+        history_items = info.get("history", [])
+        if not isinstance(history_items, list) or not history_items:
+            self.warn("差し戻し対象の履歴がありません。")
+            return
+
+        dlg = HistorySelectDialog(history_items, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        history_entry = dlg.selected_item()
+        if not history_entry:
+            self.warn("差し戻し対象の履歴を選択してください。")
+            return
+
+        cur_fn = info.get("current_file", "")
+        cur_rev = info.get("current_rev", "")
+        if not cur_fn:
+            self.warn("現行ファイルが不明です。")
+            return
+
+        history_file = history_entry.get("file", "")
+        if not history_file:
+            self.warn("履歴ファイル名が取得できません。")
+            return
+
+        history_dir, _ = ensure_folder_structure(folder_path)
+        history_path = os.path.join(history_dir, history_file)
+        if not os.path.exists(history_path):
+            self.warn("履歴ファイルが見つかりません。")
+            return
+
+        doc_base, _t, _r = parse_rev_from_filename(cur_fn)
+        doc_base_no_ext, ext = split_name_ext(doc_base)
+
+        A, B, C = next_rev_from_current(cur_rev)
+        new_rev = format_rev(A, B, C, today_yyyymmdd())
+        new_fn = f"{doc_base_no_ext}_{new_rev}{ext}"
+        new_path = os.path.join(folder_path, new_fn)
+        cur_path = os.path.join(folder_path, cur_fn)
+
+        if os.path.exists(new_path):
+            self.warn("新規ファイル名が既に存在します。再度実行してください（Cが進みます）。")
+            return
+
+        try:
+            # 1) move old current -> _History
+            hist_name = cur_fn
+            hist_path = os.path.join(history_dir, hist_name)
+            if os.path.exists(hist_path):
+                ts = dt.datetime.now().strftime("%Y%m%d%H%M%S")
+                hist_name = f"{split_name_ext(cur_fn)[0]}_{ts}{split_name_ext(cur_fn)[1]}"
+                hist_path = os.path.join(history_dir, hist_name)
+            shutil.move(cur_path, hist_path)
+
+            # 2) copy selected history -> new current
+            shutil.copy2(history_path, new_path)
+
+            # 3) update meta
+            meta = load_meta(folder_path)
+            docs = meta.get("documents", {})
+            d = docs.get(doc_key, {
+                "title": doc_key,
+                "current_file": new_fn,
+                "current_rev": new_rev,
+                "updated_at": now_iso(),
+                "updated_by": user_name(),
+                "last_memo": "",
+                "history": [],
+            })
+
+            prev_entry = {
+                "rev": cur_rev,
+                "file": hist_name,
+                "updated_at": d.get("updated_at", ""),
+                "updated_by": d.get("updated_by", ""),
+                "memo": d.get("last_memo", ""),
+            }
+            d.setdefault("history", [])
+            if isinstance(d["history"], list):
+                d["history"].append(prev_entry)
+
+            d["current_file"] = new_fn
+            d["current_rev"] = new_rev
+            d["updated_at"] = now_iso()
+            d["updated_by"] = user_name()
+            rollback_rev = history_entry.get("rev", "")
+            d["last_memo"] = f"差し戻し: {display_rev(rollback_rev)}"
+
+            docs[doc_key] = d
+            meta["documents"] = docs
+            save_meta(folder_path, meta)
+
+            self.refresh_files_table()
+            self.refresh_folder_table()
+            self.refresh_right_pane_for_doc(doc_key)
+
+        except Exception as e:
+            self.warn(f"差し戻しに失敗しました: {e}")
+
+    def on_history_clear(self):
+        sel = self._get_selected_doc()
+        if not sel:
+            return
+        folder_path, doc_key, info = sel
+        history_items = info.get("history", [])
+        if not isinstance(history_items, list) or not history_items:
+            self.warn("削除できる履歴がありません。")
+            return
+
+        dlg = HistoryClearDialog(history_items, info.get("current_rev", ""), self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        selected_items = dlg.selected_items()
+        if not selected_items:
+            self.warn("削除対象が選択されていません。")
+            return
+
+        history_dir, _ = ensure_folder_structure(folder_path)
+        deleted_files = set()
+        errors = []
+        for item in selected_items:
+            fname = item.get("file", "")
+            if not fname:
+                continue
+            fpath = os.path.join(history_dir, fname)
+            try:
+                if os.path.exists(fpath):
+                    os.remove(fpath)
+                deleted_files.add(fname)
+            except Exception as e:
+                errors.append(f"{fname}: {e}")
+
+        if deleted_files:
+            meta = load_meta(folder_path)
+            docs = meta.get("documents", {})
+            d = docs.get(doc_key, {})
+            if isinstance(d, dict):
+                history_list = d.get("history", [])
+                if isinstance(history_list, list):
+                    d["history"] = [h for h in history_list if h.get("file") not in deleted_files]
+                docs[doc_key] = d
+                meta["documents"] = docs
+                save_meta(folder_path, meta)
+                self.refresh_right_pane_for_doc(doc_key)
+
+        if errors:
+            self.warn("削除時に一部エラーが発生しました:\n" + "\n".join(errors))
 
     def start_file_lock_watch(self, file_path: str, folder_path: str, doc_key: str):
         if self.watch_timer is None:
