@@ -628,19 +628,44 @@ class BatchRegisterDialog(QDialog):
 
 
 class BatchPreviewDialog(QDialog):
-    def __init__(self, preview_text: str, parent: QWidget | None = None):
+    def __init__(self, items: List[Dict[str, Any]], parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("一括登録プレビュー")
-        self.setMinimumWidth(560)
-        self.setMinimumHeight(420)
+        self.setMinimumWidth(720)
+        self.setMinimumHeight(460)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("以下の階層イメージで取り込みます。よろしいですか？"))
+        layout.addWidget(QLabel("以下の内容で取り込みます。よろしいですか？"))
 
-        self.preview = QPlainTextEdit()
-        self.preview.setReadOnly(True)
-        self.preview.setPlainText(preview_text)
-        layout.addWidget(self.preview, 1)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["取込", "階層", "登録名", "フォルダパス"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        layout.addWidget(self.table, 1)
+
+        for entry in items:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+
+            it_check = QTableWidgetItem("")
+            it_check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            it_check.setCheckState(Qt.Checked)
+            self.table.setItem(row, 0, it_check)
+
+            it_depth = QTableWidgetItem(str(entry.get("depth", 0)))
+            it_depth.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(row, 1, it_depth)
+
+            it_name = QTableWidgetItem(entry.get("name", ""))
+            it_name.setData(Qt.UserRole, entry)
+            self.table.setItem(row, 2, it_name)
+
+            it_path = QTableWidgetItem(entry.get("path", ""))
+            it_path.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(row, 3, it_path)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("取り込む")
@@ -648,6 +673,26 @@ class BatchPreviewDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def selected_items(self) -> List[Dict[str, Any]]:
+        selected: List[Dict[str, Any]] = []
+        for row in range(self.table.rowCount()):
+            check_item = self.table.item(row, 0)
+            name_item = self.table.item(row, 2)
+            if not check_item or not name_item:
+                continue
+            if check_item.checkState() != Qt.Checked:
+                continue
+            entry = name_item.data(Qt.UserRole) or {}
+            if not isinstance(entry, dict):
+                continue
+            name = name_item.text().strip()
+            if not name:
+                continue
+            new_entry = dict(entry)
+            new_entry["name"] = name
+            selected.append(new_entry)
+        return selected
 
 
 class ArchiveDialog(QDialog):
@@ -1358,7 +1403,13 @@ class MainWindow(QMainWindow):
         drive, _ = os.path.splitdrive(root_path)
         return drive or root_path
 
-    def batch_register_items(self, root_path: str, max_depth: int) -> List[Dict[str, Any]]:
+    def batch_register_items(
+        self,
+        root_path: str,
+        max_depth: int,
+        base_categories: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        base_categories = base_categories or []
         root_category = self.root_category_name(root_path)
         registered_paths = {os.path.normcase(item["path"]) for item in self.registry}
         items: List[Dict[str, Any]] = []
@@ -1378,44 +1429,18 @@ class MainWindow(QMainWindow):
             rel_parts = [] if rel == "." else rel.split(os.sep)
             if rel_parts:
                 folder_name = rel_parts[-1]
-                category_parts = [root_category] + rel_parts[:-1]
+                category_parts = base_categories + [root_category] + rel_parts[:-1]
             else:
                 folder_name = root_category
-                category_parts = [root_category]
+                category_parts = base_categories + [root_category]
             categories = normalize_category_path(category_parts)
             items.append({
                 "name": folder_name,
                 "path": dirpath,
                 "categories": categories,
+                "depth": depth,
             })
         return items
-
-    def batch_register_preview(self, root_path: str, max_depth: int) -> str:
-        target_paths = {
-            os.path.normcase(item["path"])
-            for item in self.batch_register_items(root_path, max_depth)
-        }
-        lines: List[str] = []
-
-        def walk(current_path: str, depth: int, prefix: str):
-            name = os.path.basename(os.path.normpath(current_path)) or current_path
-            marker = " [登録]" if os.path.normcase(current_path) in target_paths else ""
-            lines.append(f"{prefix}{name}{marker}")
-            if depth >= max_depth:
-                return
-            try:
-                entries = [
-                    d for d in os.listdir(current_path)
-                    if os.path.isdir(os.path.join(current_path, d))
-                    and d.lower() not in {"_history", "_meta"}
-                ]
-            except Exception:
-                return
-            for dirname in sorted(entries):
-                walk(os.path.join(current_path, dirname), depth + 1, prefix + "  ")
-
-        walk(root_path, 0, "")
-        return "\n".join(lines)
 
     def category_options(self) -> List[List[str]]:
         levels: Dict[int, set[str]] = {}
@@ -1940,12 +1965,14 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
         act_register = None
+        act_batch_register = None
         act_edit = None
         act_delete = None
         act_archive = None
 
         if item_type == "category":
             act_register = menu.addAction("登録")
+            act_batch_register = menu.addAction("一括登録")
             act_delete = menu.addAction("削除")
             act_archive = menu.addAction("アーカイブ")
         elif item_type == "folder":
@@ -1958,6 +1985,9 @@ class MainWindow(QMainWindow):
         if action == act_register:
             initial_categories = data.get("path", [])
             self.open_register_dialog(initial_categories=initial_categories)
+        elif action == act_batch_register:
+            initial_categories = data.get("path", [])
+            self.on_batch_register_for_category(initial_categories)
         elif action == act_edit:
             path = data.get("path")
             if path:
@@ -2079,6 +2109,14 @@ class MainWindow(QMainWindow):
             return
         root_path = dlg.get_path()
         max_depth = dlg.get_depth()
+        self.run_batch_register(root_path, max_depth)
+
+    def run_batch_register(
+        self,
+        root_path: str,
+        max_depth: int,
+        base_categories: Optional[List[str]] = None,
+    ) -> None:
         if not root_path:
             self.warn("対象ディレクトリを選択してください。")
             return
@@ -2086,22 +2124,34 @@ class MainWindow(QMainWindow):
             self.warn("ディレクトリが存在しません。")
             return
 
-        preview_text = self.batch_register_preview(root_path, max_depth)
-        preview_dialog = BatchPreviewDialog(preview_text, self)
-        if preview_dialog.exec() != QDialog.Accepted:
-            return
-
-        items = self.batch_register_items(root_path, max_depth)
+        items = self.batch_register_items(root_path, max_depth, base_categories=base_categories)
         if not items:
             self.warn("登録できるフォルダがありません。")
             return
-        for item in items:
+
+        preview_dialog = BatchPreviewDialog(items, self)
+        if preview_dialog.exec() != QDialog.Accepted:
+            return
+
+        selected_items = preview_dialog.selected_items()
+        if not selected_items:
+            self.warn("取り込む項目がありません。")
+            return
+        for item in selected_items:
             ensure_folder_structure(item["path"])
-        self.registry.extend(items)
+        self.registry.extend(selected_items)
         save_registry(self.registry)
         self.refresh_folder_table()
         self.refresh_category_tree()
-        self.info(f"{len(items)} 件を一括登録しました。")
+        self.info(f"{len(selected_items)} 件を一括登録しました。")
+
+    def on_batch_register_for_category(self, category_path: List[str]):
+        dlg = BatchRegisterDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        root_path = dlg.get_path()
+        max_depth = dlg.get_depth()
+        self.run_batch_register(root_path, max_depth, base_categories=category_path)
 
     def on_folder_selected(self):
         idx = self.selected_folder_index()
