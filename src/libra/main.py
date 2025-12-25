@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, List
 
 from PySide6.QtCore import Qt, QSize, QTimer, Signal
-from PySide6.QtGui import QAction, QBrush, QColor
+from PySide6.QtGui import QAction, QBrush, QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -90,6 +90,14 @@ USER_CHECKS_PATH = os.path.join(appdata_dir(), "user_checks.json")
 DEFAULT_MEMO_TIMEOUT_MIN = 30
 UNCHECKED_COLOR = QColor("#C0504D")
 CATEGORY_PATH_SEP = "\u001f"
+ASSET_DIR = os.path.join(os.path.dirname(__file__), "asset")
+APP_ICON_PATH = os.path.join(ASSET_DIR, "icon.xpm")
+
+
+def load_app_icon() -> Optional[QIcon]:
+    if os.path.exists(APP_ICON_PATH):
+        return QIcon(APP_ICON_PATH)
+    return None
 
 
 def normalize_category_path(values: List[str]) -> List[str]:
@@ -574,6 +582,42 @@ class RegisterDialog(QDialog):
         )
 
 
+class BatchRegisterDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("一括登録")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.path_edit = QLineEdit()
+        self.path_btn = QPushButton("参照...")
+        self.path_btn.clicked.connect(self.pick_folder)
+
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.path_edit, 1)
+        path_row.addWidget(self.path_btn)
+
+        form.addRow("対象ディレクトリ", path_row)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("OK")
+        buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def pick_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "登録するディレクトリを選択")
+        if path:
+            self.path_edit.setText(path)
+
+    def get_path(self) -> str:
+        return self.path_edit.text().strip()
+
+
 class VersionSelectDialog(QDialog):
     def __init__(self, current_rev: str, parent: QWidget | None = None):
         super().__init__(parent)
@@ -986,8 +1030,11 @@ class MainWindow(QMainWindow):
         self.search.setPlaceholderText("検索（登録名でフィルタ）")
         self.search.textChanged.connect(self.refresh_folder_table)
 
-        btn_register = QPushButton("登録")
+        btn_register = QPushButton("個別登録")
         btn_register.clicked.connect(self.on_register)
+
+        btn_batch_register = QPushButton("一括登録")
+        btn_batch_register.clicked.connect(self.on_batch_register)
 
         btn_update = QPushButton("更新")
         btn_update.clicked.connect(self.on_update)
@@ -1000,6 +1047,7 @@ class MainWindow(QMainWindow):
 
         top.addWidget(self.search, 1)
         top.addWidget(btn_register)
+        top.addWidget(btn_batch_register)
         top.addWidget(btn_update)
         top.addWidget(btn_replace)
         top.addWidget(btn_rescan)
@@ -1147,6 +1195,39 @@ class MainWindow(QMainWindow):
         if categories:
             return categories
         return ["未分類"]
+
+    def root_category_name(self, root_path: str) -> str:
+        base = os.path.basename(os.path.normpath(root_path))
+        if base:
+            return base
+        drive, _ = os.path.splitdrive(root_path)
+        return drive or root_path
+
+    def batch_register_items(self, root_path: str) -> List[Dict[str, Any]]:
+        root_category = self.root_category_name(root_path)
+        registered_paths = {os.path.normcase(item["path"]) for item in self.registry}
+        items: List[Dict[str, Any]] = []
+        for dirpath, dirnames, _filenames in os.walk(root_path):
+            dirnames[:] = [d for d in dirnames if d.lower() not in {"_history", "_meta"}]
+            if dirnames:
+                continue
+            if os.path.normcase(dirpath) in registered_paths:
+                continue
+            rel = os.path.relpath(dirpath, root_path)
+            rel_parts = [] if rel == "." else rel.split(os.sep)
+            if rel_parts:
+                folder_name = rel_parts[-1]
+                category_parts = [root_category] + rel_parts[:-1]
+            else:
+                folder_name = root_category
+                category_parts = [root_category]
+            categories = normalize_category_path(category_parts)
+            items.append({
+                "name": folder_name,
+                "path": dirpath,
+                "categories": categories,
+            })
+        return items
 
     def category_options(self) -> List[List[str]]:
         levels: Dict[int, set[str]] = {}
@@ -1753,6 +1834,30 @@ class MainWindow(QMainWindow):
     def on_register(self):
         self.open_register_dialog()
 
+    def on_batch_register(self):
+        dlg = BatchRegisterDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        root_path = dlg.get_path()
+        if not root_path:
+            self.warn("対象ディレクトリを選択してください。")
+            return
+        if not os.path.isdir(root_path):
+            self.warn("ディレクトリが存在しません。")
+            return
+
+        items = self.batch_register_items(root_path)
+        if not items:
+            self.warn("登録できるフォルダがありません。")
+            return
+        for item in items:
+            ensure_folder_structure(item["path"])
+        self.registry.extend(items)
+        save_registry(self.registry)
+        self.refresh_folder_table()
+        self.refresh_category_tree()
+        self.info(f"{len(items)} 件を一括登録しました。")
+
     def on_folder_selected(self):
         idx = self.selected_folder_index()
         if idx < 0:
@@ -2274,7 +2379,12 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    icon = load_app_icon()
+    if icon:
+        app.setWindowIcon(icon)
     w = MainWindow()
+    if icon:
+        w.setWindowIcon(icon)
     w.show()
     sys.exit(app.exec())
 
