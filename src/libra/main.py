@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, List
 
 from PySide6.QtCore import Qt, QSize, QTimer, Signal
-from PySide6.QtGui import QAction, QBrush, QColor, QIcon
+from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -94,14 +94,26 @@ USER_CHECKS_PATH = os.path.join(appdata_dir(), "user_checks.json")
 DEFAULT_MEMO_TIMEOUT_MIN = 30
 UNCHECKED_COLOR = QColor("#C0504D")
 CATEGORY_PATH_SEP = "\u001f"
-ASSET_DIR = os.path.join(os.path.dirname(__file__), "asset")
-APP_ICON_PATH = os.path.join(ASSET_DIR, "icon.xpm")
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+ASSET_DIR = os.path.join(ROOT_DIR, "assets")
+APP_ICON_PATH = os.path.join(ASSET_DIR, "icons", "Libra.ico")
+CATEGORY_TOGGLE_ON_PATH = os.path.join(ASSET_DIR, "images", "show.png")
+CATEGORY_TOGGLE_OFF_PATH = os.path.join(ASSET_DIR, "images", "hide.png")
 
 
 def load_app_icon() -> Optional[QIcon]:
     if os.path.exists(APP_ICON_PATH):
         return QIcon(APP_ICON_PATH)
     return None
+
+
+def build_category_toggle_icon() -> QIcon:
+    icon = QIcon()
+    if os.path.exists(CATEGORY_TOGGLE_ON_PATH):
+        icon.addPixmap(QPixmap(CATEGORY_TOGGLE_ON_PATH), QIcon.Normal, QIcon.On)
+    if os.path.exists(CATEGORY_TOGGLE_OFF_PATH):
+        icon.addPixmap(QPixmap(CATEGORY_TOGGLE_OFF_PATH), QIcon.Normal, QIcon.Off)
+    return icon
 
 
 def normalize_category_path(values: List[str]) -> List[str]:
@@ -152,6 +164,7 @@ def load_settings() -> Dict[str, Any]:
         "memo_timeout_min": DEFAULT_MEMO_TIMEOUT_MIN,
         "category_order": {"categories": {}, "folder": {}},
         "archived_categories": [],
+        "category_tree_color_enabled": True,
         "ignore_types": {
             "shortcut": True,
             "bak": True,
@@ -1325,6 +1338,19 @@ class MainWindow(QMainWindow):
         self.category_tree.itemChanged.connect(self.on_category_tree_item_changed)
         self.category_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.category_tree.customContextMenuRequested.connect(self.on_category_tree_context_menu)
+        self.category_color_toggle = QCheckBox("文字色")
+        self.category_color_toggle.setToolTip("カテゴリツリーの文字色表示を切り替え")
+        self.category_color_toggle.setChecked(self.is_category_tree_color_enabled())
+        toggle_icon = build_category_toggle_icon()
+        if not toggle_icon.isNull():
+            self.category_color_toggle.setIcon(toggle_icon)
+            self.category_color_toggle.setIconSize(QSize(18, 18))
+        self.category_color_toggle.toggled.connect(self.on_category_color_toggle)
+        toggle_layout = QHBoxLayout()
+        toggle_layout.setContentsMargins(0, 0, 0, 0)
+        toggle_layout.addWidget(self.category_color_toggle)
+        toggle_layout.addStretch(1)
+        tree_layout.addLayout(toggle_layout)
         tree_layout.addWidget(self.category_tree)
         splitter.addWidget(tree_box)
 
@@ -1891,6 +1917,7 @@ class MainWindow(QMainWindow):
         self.category_tree.blockSignals(True)
         self.category_tree.clear()
         order = self.category_order()
+        color_enabled = self.is_category_tree_color_enabled()
         root = {"children": {}, "folders": []}
         for item in self.registry:
             categories = self.category_path_for_item(item)
@@ -1927,7 +1954,7 @@ class MainWindow(QMainWindow):
                     parent_item.addChild(child_item)
                 child_highlight_enabled = highlight_enabled and child_checked
                 child_unchecked = add_nodes(child_item, child_node, child_path, child_highlight_enabled)
-                if child_unchecked and child_highlight_enabled:
+                if color_enabled and child_unchecked and child_highlight_enabled:
                     child_item.setForeground(0, QBrush(UNCHECKED_COLOR))
                     has_unchecked = True
 
@@ -1946,7 +1973,7 @@ class MainWindow(QMainWindow):
                 folder_highlight_enabled = highlight_enabled and folder_checked
                 if folder_highlight_enabled:
                     folder_unchecked = self.folder_has_unchecked(folder["path"])
-                    if folder_unchecked:
+                    if color_enabled and folder_unchecked:
                         folder_item.setForeground(0, QBrush(UNCHECKED_COLOR))
                         has_unchecked = True
                 if parent_item is None:
@@ -1960,6 +1987,17 @@ class MainWindow(QMainWindow):
         self.category_tree.expandAll()
         self.category_tree.blockSignals(False)
         self._category_tree_refreshing = False
+
+    def is_category_tree_color_enabled(self) -> bool:
+        return bool(self.settings.get("category_tree_color_enabled", True))
+
+    def set_category_tree_color_enabled(self, enabled: bool) -> None:
+        self.settings["category_tree_color_enabled"] = enabled
+        save_settings(self.settings)
+
+    def on_category_color_toggle(self, checked: bool) -> None:
+        self.set_category_tree_color_enabled(checked)
+        self.refresh_category_tree()
 
     def schedule_category_tree_refresh(self):
         if self._category_tree_refresh_pending:
