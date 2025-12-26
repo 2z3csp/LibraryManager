@@ -2023,26 +2023,40 @@ class MainWindow(QMainWindow):
             return
 
         action = menu.exec(self.category_tree.viewport().mapToGlobal(pos))
+        if not action:
+            return
         if action == act_register:
             initial_categories = data.get("path", [])
+            if not isinstance(initial_categories, list):
+                initial_categories = []
             self.open_register_dialog(initial_categories=initial_categories)
         elif action == act_batch_register:
             initial_categories = data.get("path", [])
+            if not isinstance(initial_categories, list):
+                initial_categories = []
             self.on_batch_register_for_category(initial_categories)
         elif action == act_edit:
             path = data.get("path")
+            if not isinstance(path, str):
+                path = item.toolTip(0)
             if path:
                 self.edit_registered_folder(path)
         elif action == act_delete:
             path = data.get("path")
+            if item_type == "folder" and not isinstance(path, str):
+                path = item.toolTip(0)
             if not path:
                 return
             if item_type == "folder":
                 self.delete_registered_folder(path)
             else:
+                if not isinstance(path, list):
+                    return
                 self.delete_category_hierarchy(path)
         elif action == act_archive:
             path = data.get("path")
+            if not isinstance(path, list):
+                return
             if path and self.archive_category_path(path):
                 self.refresh_folder_table()
                 self.refresh_category_tree()
