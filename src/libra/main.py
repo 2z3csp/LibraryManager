@@ -2176,6 +2176,7 @@ class MainWindow(QMainWindow):
         act_edit = None
         act_delete = None
         act_archive = None
+        act_register_as_category = None
 
         if item_type == "category":
             act_register = menu.addAction("登録")
@@ -2184,6 +2185,7 @@ class MainWindow(QMainWindow):
             act_archive = menu.addAction("アーカイブ")
         elif item_type == "folder":
             act_edit = menu.addAction("編集")
+            act_register_as_category = menu.addAction("カテゴリとして登録")
             act_delete = menu.addAction("削除")
         else:
             return
@@ -2207,6 +2209,18 @@ class MainWindow(QMainWindow):
                 path = item.toolTip(0)
             if path:
                 self.edit_registered_folder(path)
+        elif action == act_register_as_category:
+            root_path = data.get("path")
+            category_path = data.get("category_path", [])
+            folder_name = item.text(0).strip()
+            if not isinstance(root_path, str) or not root_path:
+                return
+            if not isinstance(category_path, list):
+                category_path = []
+            if not folder_name:
+                return
+            base_categories = normalize_category_path(category_path + [folder_name])
+            self.run_batch_register(root_path, 1, base_categories=base_categories)
         elif action == act_delete:
             path = data.get("path")
             if item_type == "folder" and not isinstance(path, str):
