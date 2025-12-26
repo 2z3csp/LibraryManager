@@ -2023,6 +2023,8 @@ class MainWindow(QMainWindow):
             return
 
         action = menu.exec(self.category_tree.viewport().mapToGlobal(pos))
+        if not action:
+            return
         if action == act_register:
             initial_categories = data.get("path", [])
             if not isinstance(initial_categories, list):
