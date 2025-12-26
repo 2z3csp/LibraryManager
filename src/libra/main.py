@@ -1322,6 +1322,7 @@ class MainWindow(QMainWindow):
         self.category_tree.order_changed.connect(self.on_category_tree_order_changed)
         self.category_tree.itemSelectionChanged.connect(self.on_category_tree_selected)
         self.category_tree.itemDoubleClicked.connect(self.on_category_tree_double_clicked)
+        self.category_tree.itemChanged.connect(self.on_category_tree_item_changed)
         self.category_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.category_tree.customContextMenuRequested.connect(self.on_category_tree_context_menu)
         tree_layout.addWidget(self.category_tree)
@@ -1409,6 +1410,8 @@ class MainWindow(QMainWindow):
         self.watch_doc_key = ""
         self.watch_started_at: Optional[dt.datetime] = None
         self.current_user = user_name()
+        self._category_tree_refreshing = False
+        self._category_tree_refresh_pending = False
 
         self.startup_rescan()
         self.refresh_folder_table()
@@ -1570,6 +1573,46 @@ class MainWindow(QMainWindow):
         order.setdefault("categories", {})
         order.setdefault("folder", {})
         return order
+
+    def category_check_states(self) -> Dict[str, bool]:
+        checks = self.settings.get("category_check_states")
+        if not isinstance(checks, dict):
+            checks = {}
+            self.settings["category_check_states"] = checks
+        return checks
+
+    def folder_tree_check_states(self) -> Dict[str, bool]:
+        checks = self.settings.get("folder_tree_check_states")
+        if not isinstance(checks, dict):
+            checks = {}
+            self.settings["folder_tree_check_states"] = checks
+        return checks
+
+    def is_category_checked(self, path: List[str]) -> bool:
+        key = self.category_path_key(path)
+        return bool(self.category_check_states().get(key, True))
+
+    def is_folder_tree_checked(self, folder_path: str) -> bool:
+        key = self.folder_key(folder_path)
+        return bool(self.folder_tree_check_states().get(key, True))
+
+    def set_category_checked(self, path: List[str], checked: bool) -> None:
+        checks = self.category_check_states()
+        checks[self.category_path_key(path)] = checked
+        self.settings["category_check_states"] = checks
+        save_settings(self.settings)
+
+    def set_folder_tree_checked(self, folder_path: str, checked: bool) -> None:
+        checks = self.folder_tree_check_states()
+        checks[self.folder_key(folder_path)] = checked
+        self.settings["folder_tree_check_states"] = checks
+        save_settings(self.settings)
+
+    def is_category_highlight_enabled_for_path(self, path: List[str]) -> bool:
+        for depth in range(1, len(path) + 1):
+            if not self.is_category_checked(path[:depth]):
+                return False
+        return True
 
     def migrate_category_order(self, legacy: Dict[str, Any]) -> Dict[str, Any]:
         new_order: Dict[str, Any] = {"categories": {}, "folder": {}}
@@ -1802,8 +1845,13 @@ class MainWindow(QMainWindow):
         for item in items:
             name = item["name"]
             path = item["path"]
+            categories = self.category_path_for_item(item)
             last_date = ""
-            has_unchecked = self.folder_has_unchecked(path)
+            highlight_enabled = (
+                self.is_category_highlight_enabled_for_path(categories)
+                and self.is_folder_tree_checked(path)
+            )
+            has_unchecked = highlight_enabled and self.folder_has_unchecked(path)
 
             if os.path.isdir(path):
                 try:
@@ -1839,6 +1887,8 @@ class MainWindow(QMainWindow):
             self.select_folder_in_table(preserve_path)
 
     def refresh_category_tree(self):
+        self._category_tree_refreshing = True
+        self.category_tree.blockSignals(True)
         self.category_tree.clear()
         order = self.category_order()
         root = {"children": {}, "folders": []}
@@ -1851,7 +1901,12 @@ class MainWindow(QMainWindow):
                 node = node["children"].setdefault(category, {"children": {}, "folders": []})
             node["folders"].append(item)
 
-        def add_nodes(parent_item: Optional[QTreeWidgetItem], node: Dict[str, Any], path: List[str]) -> bool:
+        def add_nodes(
+            parent_item: Optional[QTreeWidgetItem],
+            node: Dict[str, Any],
+            path: List[str],
+            highlight_enabled: bool,
+        ) -> bool:
             key = self.category_path_key(path)
             has_unchecked = False
             child_names = self.ordered_list(
@@ -1861,13 +1916,18 @@ class MainWindow(QMainWindow):
             for name in child_names:
                 child_node = node["children"][name]
                 child_item = QTreeWidgetItem([name])
-                child_item.setData(0, Qt.UserRole, {"type": "category", "path": path + [name]})
+                child_path = path + [name]
+                child_item.setData(0, Qt.UserRole, {"type": "category", "path": child_path})
+                child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable)
+                child_checked = self.is_category_checked(child_path)
+                child_item.setCheckState(0, Qt.Checked if child_checked else Qt.Unchecked)
                 if parent_item is None:
                     self.category_tree.addTopLevelItem(child_item)
                 else:
                     parent_item.addChild(child_item)
-                child_unchecked = add_nodes(child_item, child_node, path + [name])
-                if child_unchecked:
+                child_highlight_enabled = highlight_enabled and child_checked
+                child_unchecked = add_nodes(child_item, child_node, child_path, child_highlight_enabled)
+                if child_unchecked and child_highlight_enabled:
                     child_item.setForeground(0, QBrush(UNCHECKED_COLOR))
                     has_unchecked = True
 
@@ -1875,24 +1935,41 @@ class MainWindow(QMainWindow):
             for folder in self.folders_sorted_for_category(node["folders"], folder_order):
                 folder_item = QTreeWidgetItem([folder["name"]])
                 folder_item.setToolTip(0, folder["path"])
+                folder_item.setFlags(folder_item.flags() | Qt.ItemIsUserCheckable)
+                folder_checked = self.is_folder_tree_checked(folder["path"])
+                folder_item.setCheckState(0, Qt.Checked if folder_checked else Qt.Unchecked)
                 folder_item.setData(0, Qt.UserRole, {
                     "type": "folder",
                     "path": folder["path"],
                     "category_path": path,
                 })
-                folder_unchecked = self.folder_has_unchecked(folder["path"])
-                if folder_unchecked:
-                    folder_item.setForeground(0, QBrush(UNCHECKED_COLOR))
-                    has_unchecked = True
+                folder_highlight_enabled = highlight_enabled and folder_checked
+                if folder_highlight_enabled:
+                    folder_unchecked = self.folder_has_unchecked(folder["path"])
+                    if folder_unchecked:
+                        folder_item.setForeground(0, QBrush(UNCHECKED_COLOR))
+                        has_unchecked = True
                 if parent_item is None:
                     self.category_tree.addTopLevelItem(folder_item)
                 else:
                     parent_item.addChild(folder_item)
-            return has_unchecked
+            return has_unchecked if highlight_enabled else False
 
-        add_nodes(None, root, [])
+        add_nodes(None, root, [], True)
 
         self.category_tree.expandAll()
+        self.category_tree.blockSignals(False)
+        self._category_tree_refreshing = False
+
+    def schedule_category_tree_refresh(self):
+        if self._category_tree_refresh_pending:
+            return
+        self._category_tree_refresh_pending = True
+        QTimer.singleShot(0, self.apply_category_tree_refresh)
+
+    def apply_category_tree_refresh(self):
+        self._category_tree_refresh_pending = False
+        self.refresh_category_tree()
 
     def update_category_order_from_tree(self):
         order = {"categories": {}, "folder": {}}
@@ -2041,6 +2118,28 @@ class MainWindow(QMainWindow):
     def on_category_tree_order_changed(self):
         self.update_category_order_from_tree()
         self.refresh_category_tree()
+
+    def on_category_tree_item_changed(self, item: QTreeWidgetItem, column: int):
+        if self._category_tree_refreshing:
+            return
+        if column != 0:
+            return
+        data = item.data(0, Qt.UserRole) or {}
+        item_type = data.get("type")
+        if item_type == "category":
+            path = data.get("path", [])
+            if not isinstance(path, list):
+                return
+            self.set_category_checked(path, item.checkState(0) == Qt.Checked)
+        elif item_type == "folder":
+            folder_path = data.get("path")
+            if not isinstance(folder_path, str):
+                return
+            self.set_folder_tree_checked(folder_path, item.checkState(0) == Qt.Checked)
+        else:
+            return
+        self.refresh_folder_table()
+        self.schedule_category_tree_refresh()
 
     def on_folders_table_context_menu(self, pos):
         item = self.folders_table.itemAt(pos)
