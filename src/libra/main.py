@@ -657,7 +657,8 @@ class BatchPreviewDialog(QDialog):
                 item = nodes.get(key)
                 if not item:
                     item = QTreeWidgetItem([ "", part, "" ])
-                    item.setFlags(item.flags() | Qt.ItemIsSelectable)
+                    item.setFlags(item.flags() | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                    item.setCheckState(0, Qt.Checked)
                     if parent_item is None:
                         self.tree.addTopLevelItem(item)
                     else:
@@ -683,10 +684,11 @@ class BatchPreviewDialog(QDialog):
 
     def selected_items(self) -> List[Dict[str, Any]]:
         selected: List[Dict[str, Any]] = []
-        def walk(item: QTreeWidgetItem):
+        def walk(item: QTreeWidgetItem, ancestor_checked: bool):
+            current_checked = ancestor_checked and item.checkState(0) == Qt.Checked
             entry = item.data(0, Qt.UserRole)
             if entry and isinstance(entry, dict):
-                if item.checkState(0) == Qt.Checked:
+                if current_checked:
                     name = item.text(1).strip()
                     path = entry.get("path")
                     categories = entry.get("categories")
@@ -697,10 +699,10 @@ class BatchPreviewDialog(QDialog):
                             "categories": categories,
                         })
             for i in range(item.childCount()):
-                walk(item.child(i))
+                walk(item.child(i), current_checked)
 
         for i in range(self.tree.topLevelItemCount()):
-            walk(self.tree.topLevelItem(i))
+            walk(self.tree.topLevelItem(i), True)
         return selected
 
 
