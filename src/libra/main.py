@@ -637,35 +637,42 @@ class BatchPreviewDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("以下の内容で取り込みます。よろしいですか？"))
 
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["取込", "階層", "登録名", "フォルダパス"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        layout.addWidget(self.table, 1)
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderLabels(["取込", "登録名", "フォルダパス"])
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tree.header().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.tree, 1)
 
+        nodes: Dict[Tuple[str, ...], QTreeWidgetItem] = {}
         for entry in items:
-            row = self.table.rowCount()
-            self.table.insertRow(row)
+            parts = entry.get("rel_parts", [])
+            if not isinstance(parts, list):
+                continue
+            parent_item: Optional[QTreeWidgetItem] = None
+            for depth, part in enumerate(parts):
+                key = tuple(parts[: depth + 1])
+                item = nodes.get(key)
+                if not item:
+                    item = QTreeWidgetItem([ "", part, "" ])
+                    item.setFlags(item.flags() | Qt.ItemIsSelectable)
+                    if parent_item is None:
+                        self.tree.addTopLevelItem(item)
+                    else:
+                        parent_item.addChild(item)
+                    nodes[key] = item
+                parent_item = item
 
-            it_check = QTableWidgetItem("")
-            it_check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-            it_check.setCheckState(Qt.Checked)
-            self.table.setItem(row, 0, it_check)
-
-            it_depth = QTableWidgetItem(str(entry.get("depth", 0)))
-            it_depth.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row, 1, it_depth)
-
-            it_name = QTableWidgetItem(entry.get("name", ""))
-            it_name.setData(Qt.UserRole, entry)
-            self.table.setItem(row, 2, it_name)
-
-            it_path = QTableWidgetItem(entry.get("path", ""))
-            it_path.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row, 3, it_path)
+            if parent_item is None:
+                parent_item = QTreeWidgetItem([ "", entry.get("name", ""), entry.get("path", "") ])
+                self.tree.addTopLevelItem(parent_item)
+            parent_item.setText(1, entry.get("name", ""))
+            parent_item.setText(2, entry.get("path", ""))
+            parent_item.setData(0, Qt.UserRole, entry)
+            parent_item.setFlags(parent_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+            parent_item.setCheckState(0, Qt.Checked)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("取り込む")
@@ -676,30 +683,24 @@ class BatchPreviewDialog(QDialog):
 
     def selected_items(self) -> List[Dict[str, Any]]:
         selected: List[Dict[str, Any]] = []
-        for row in range(self.table.rowCount()):
-            check_item = self.table.item(row, 0)
-            if not check_item:
-                continue
-            if check_item.checkState() != Qt.Checked:
-                continue
-            name_item = self.table.item(row, 2)
-            if not name_item:
-                continue
-            entry = name_item.data(Qt.UserRole) or {}
-            if not isinstance(entry, dict):
-                continue
-            name = name_item.text().strip()
-            if not name:
-                continue
-            path = entry.get("path")
-            categories = entry.get("categories")
-            if not path or not categories:
-                continue
-            selected.append({
-                "name": name,
-                "path": path,
-                "categories": categories,
-            })
+        def walk(item: QTreeWidgetItem):
+            entry = item.data(0, Qt.UserRole)
+            if entry and isinstance(entry, dict):
+                if item.checkState(0) == Qt.Checked:
+                    name = item.text(1).strip()
+                    path = entry.get("path")
+                    categories = entry.get("categories")
+                    if name and path and categories:
+                        selected.append({
+                            "name": name,
+                            "path": path,
+                            "categories": categories,
+                        })
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i))
         return selected
 
 
