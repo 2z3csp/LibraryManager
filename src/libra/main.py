@@ -94,8 +94,9 @@ USER_CHECKS_PATH = os.path.join(appdata_dir(), "user_checks.json")
 DEFAULT_MEMO_TIMEOUT_MIN = 30
 UNCHECKED_COLOR = QColor("#C0504D")
 CATEGORY_PATH_SEP = "\u001f"
-ASSET_DIR = os.path.join(os.path.dirname(__file__), "asset")
-APP_ICON_PATH = os.path.join(ASSET_DIR, "icon.xpm")
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+ASSET_DIR = os.path.join(ROOT_DIR, "assets")
+APP_ICON_PATH = os.path.join(ASSET_DIR, "icons", "Libra.ico")
 
 
 def load_app_icon() -> Optional[QIcon]:
