@@ -9,7 +9,7 @@
 # Notes:
 # - Keeps your existing folder structure: "latest files" live in the registered folder root.
 # - Uses "_History" folder under the registered folder.
-# - Stores metadata under "_Meta" folder under the registered folder.
+# - Stores metadata as a hidden ".libra_meta.json" file under the registered folder.
 #
 # Tested targets: Windows, OneDrive local sync folder.
 
@@ -63,6 +63,9 @@ REV_RE = re.compile(
 )
 
 TEMP_FILE_RE = re.compile(r"^~\$")  # Office temporary files
+META_FILENAME = ".libra_meta.json"
+LEGACY_META_DIR = "_Meta"
+LEGACY_META_FILENAME = "docmeta.json"
 
 
 def now_iso() -> str:
@@ -188,26 +191,44 @@ def save_user_checks(checks: Dict[str, Dict[str, bool]]) -> None:
         json.dump({"folders": checks}, f, ensure_ascii=False, indent=2)
 
 
-def ensure_folder_structure(folder_path: str) -> Tuple[str, str]:
-    """
-    Returns (history_dir, meta_dir)
-    """
+def ensure_history_dir(folder_path: str) -> str:
     history_dir = os.path.join(folder_path, "_History")
-    meta_dir = os.path.join(folder_path, "_Meta")
     os.makedirs(history_dir, exist_ok=True)
-    os.makedirs(meta_dir, exist_ok=True)
-    return history_dir, meta_dir
+    return history_dir
+
+
+def legacy_meta_path_for_folder(folder_path: str) -> str:
+    return os.path.join(folder_path, LEGACY_META_DIR, LEGACY_META_FILENAME)
 
 
 def meta_path_for_folder(folder_path: str) -> str:
-    _, meta_dir = ensure_folder_structure(folder_path)
-    return os.path.join(meta_dir, "docmeta.json")
+    return os.path.join(folder_path, META_FILENAME)
+
+
+def set_hidden_on_windows(path: str) -> None:
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        FILE_ATTRIBUTE_HIDDEN = 0x02
+        attrs = ctypes.windll.kernel32.GetFileAttributesW(path)
+        if attrs == -1:
+            return
+        if attrs & FILE_ATTRIBUTE_HIDDEN:
+            return
+        ctypes.windll.kernel32.SetFileAttributesW(path, attrs | FILE_ATTRIBUTE_HIDDEN)
+    except Exception:
+        return
 
 
 def load_meta(folder_path: str) -> Dict[str, Any]:
     p = meta_path_for_folder(folder_path)
+    legacy_path = legacy_meta_path_for_folder(folder_path)
     if not os.path.exists(p):
-        return {"documents": {}}
+        if not os.path.exists(legacy_path):
+            return {"documents": {}}
+        p = legacy_path
     try:
         with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -224,6 +245,7 @@ def save_meta(folder_path: str, meta: Dict[str, Any]) -> None:
     p = meta_path_for_folder(folder_path)
     with open(p, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
+    set_hidden_on_windows(p)
 
 
 def split_name_ext(filename: str) -> Tuple[str, str]:
@@ -335,8 +357,10 @@ def safe_list_files(folder_path: str) -> List[str]:
             full = os.path.join(folder_path, name)
             if os.path.isdir(full):
                 # skip management folders
-                if name.lower() in {"_history", "_meta"}:
+                if name.lower() in {"_history", LEGACY_META_DIR.lower()}:
                     continue
+                continue
+            if name.lower() == META_FILENAME.lower():
                 continue
             if TEMP_FILE_RE.match(name):
                 continue
@@ -1425,7 +1449,7 @@ class MainWindow(QMainWindow):
         registered_paths = {os.path.normcase(item["path"]) for item in self.registry}
         items: List[Dict[str, Any]] = []
         for dirpath, dirnames, _filenames in os.walk(root_path):
-            dirnames[:] = [d for d in dirnames if d.lower() not in {"_history", "_meta"}]
+            dirnames[:] = [d for d in dirnames if d.lower() not in {"_history", LEGACY_META_DIR.lower()}]
             dirnames.sort(key=str.casefold)
             rel = os.path.relpath(dirpath, root_path)
             depth = 0 if rel == "." else len(rel.split(os.sep))
@@ -1607,22 +1631,25 @@ class MainWindow(QMainWindow):
                 self.warn("このフォルダは既に登録されています。")
                 return
             new_history = os.path.join(new_path, "_History")
-            new_meta = os.path.join(new_path, "_Meta")
-            if os.path.exists(new_history) or os.path.exists(new_meta):
-                self.warn("移動先に _History または _Meta が既に存在します。更新をキャンセルしました。")
+            new_meta = meta_path_for_folder(new_path)
+            new_legacy_meta = legacy_meta_path_for_folder(new_path)
+            if os.path.exists(new_history) or os.path.exists(new_meta) or os.path.exists(new_legacy_meta):
+                self.warn("移動先に _History またはメタデータが既に存在します。更新をキャンセルしました。")
                 return
             old_history = os.path.join(old_path, "_History")
-            old_meta = os.path.join(old_path, "_Meta")
+            old_meta = meta_path_for_folder(old_path)
+            old_legacy_meta = legacy_meta_path_for_folder(old_path)
             try:
                 if os.path.exists(old_history):
                     shutil.move(old_history, new_history)
                 if os.path.exists(old_meta):
                     shutil.move(old_meta, new_meta)
+                elif os.path.exists(old_legacy_meta):
+                    os.makedirs(os.path.dirname(new_legacy_meta), exist_ok=True)
+                    shutil.move(old_legacy_meta, new_legacy_meta)
             except Exception as e:
-                self.warn(f"_History/_Meta の移動に失敗しました: {e}")
+                self.warn(f"_History/メタデータの移動に失敗しました: {e}")
                 return
-
-        ensure_folder_structure(new_path)
 
         item["name"] = name
         item["path"] = new_path
@@ -1641,7 +1668,7 @@ class MainWindow(QMainWindow):
         if idx < 0:
             self.warn("登録情報が見つかりません。")
             return
-        if not self.ask("この登録を削除しますか？（_History/_Meta は削除しません）"):
+        if not self.ask("この登録を削除しますか？（_History/メタデータ は削除しません）"):
             return
         self.registry.pop(idx)
         save_registry(self.registry)
@@ -2095,9 +2122,6 @@ class MainWindow(QMainWindow):
             self.warn("フォルダが存在しません。")
             return
 
-        # Ensure _History/_Meta
-        ensure_folder_structure(path)
-
         # Prevent duplicates by path
         for x in self.registry:
             if os.path.normcase(x["path"]) == os.path.normcase(path):
@@ -2151,8 +2175,6 @@ class MainWindow(QMainWindow):
         if not selected_items:
             self.warn("取り込む項目がありません。")
             return
-        for item in selected_items:
-            ensure_folder_structure(item["path"])
         self.registry.extend(selected_items)
         save_registry(self.registry)
         self.refresh_folder_table()
@@ -2322,7 +2344,7 @@ class MainWindow(QMainWindow):
         new_rev = format_rev(A, B, C, today_yyyymmdd())
         new_fn = f"{doc_base_no_ext}_{new_rev}{ext}"
 
-        history_dir, _ = ensure_folder_structure(folder_path)
+        history_dir = ensure_history_dir(folder_path)
 
         cur_path = os.path.join(folder_path, cur_fn)
         new_path = os.path.join(folder_path, new_fn)
@@ -2420,7 +2442,7 @@ class MainWindow(QMainWindow):
             self.warn("差し替えるファイルを選択してください。")
             return
 
-        history_dir, _ = ensure_folder_structure(folder_path)
+        history_dir = ensure_history_dir(folder_path)
 
         cur_path = os.path.join(folder_path, cur_fn)
         if not os.path.exists(cur_path):
@@ -2526,7 +2548,7 @@ class MainWindow(QMainWindow):
             self.warn("履歴ファイル名が取得できません。")
             return
 
-        history_dir, _ = ensure_folder_structure(folder_path)
+        history_dir = ensure_history_dir(folder_path)
         history_path = os.path.join(history_dir, history_file)
         if not os.path.exists(history_path):
             self.warn("履歴ファイルが見つかりません。")
@@ -2620,7 +2642,7 @@ class MainWindow(QMainWindow):
             self.warn("削除対象が選択されていません。")
             return
 
-        history_dir, _ = ensure_folder_structure(folder_path)
+        history_dir = ensure_history_dir(folder_path)
         deleted_files = set()
         errors = []
         for item in selected_items:
