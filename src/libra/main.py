@@ -1807,7 +1807,26 @@ class MainWindow(QMainWindow):
         self.registry = [item for item in self.registry if item["path"] not in target_paths]
         self.remove_user_checks_for_paths(target_paths)
         self.remove_archived_under_path(path)
+        order = self.category_order()
+        target_key = self.category_path_key(path)
+        parent_key = self.category_path_key(path[:-1])
+        if path and parent_key in order.get("categories", {}):
+            order["categories"][parent_key] = [
+                name for name in order["categories"][parent_key]
+                if name != path[-1]
+            ]
+            if not order["categories"][parent_key]:
+                order["categories"].pop(parent_key, None)
+        prefix = f"{target_key}{CATEGORY_PATH_SEP}" if target_key else ""
+        for key in list(order.get("categories", {}).keys()):
+            if key == target_key or (prefix and key.startswith(prefix)):
+                order["categories"].pop(key, None)
+        for key in list(order.get("folder", {}).keys()):
+            if key == target_key or (prefix and key.startswith(prefix)):
+                order["folder"].pop(key, None)
+        self.settings["category_order"] = order
         save_registry(self.registry)
+        save_settings(self.settings)
         if self.current_folder and self.current_folder["path"] in target_paths:
             self.current_folder = None
             self.current_meta = None
@@ -2217,6 +2236,20 @@ class MainWindow(QMainWindow):
                 return
             if not isinstance(category_path, list):
                 category_path = []
+            parent_item = item.parent()
+            current_category_order = []
+            if parent_item is None:
+                for i in range(self.category_tree.topLevelItemCount()):
+                    top = self.category_tree.topLevelItem(i)
+                    top_data = top.data(0, Qt.UserRole) or {}
+                    if top_data.get("type") == "category":
+                        current_category_order.append(top.text(0))
+            else:
+                for i in range(parent_item.childCount()):
+                    child = parent_item.child(i)
+                    child_data = child.data(0, Qt.UserRole) or {}
+                    if child_data.get("type") == "category":
+                        current_category_order.append(child.text(0))
             base_categories = normalize_category_path(category_path)
             if not self.run_batch_register(root_path, 1, base_categories=base_categories):
                 return
@@ -2239,13 +2272,10 @@ class MainWindow(QMainWindow):
                     path for path in folder_order
                     if os.path.normcase(path) != os.path.normcase(root_path)
                 ]
-            category_order = order.get("categories", {}).get(key, [])
-            if not isinstance(category_order, list):
-                category_order = []
-            if folder_name and folder_name not in category_order:
-                category_order.append(folder_name)
-            if category_order:
-                order["categories"][key] = category_order
+            if folder_name and folder_name not in current_category_order:
+                current_category_order.append(folder_name)
+            if current_category_order:
+                order["categories"][key] = current_category_order
             self.settings["category_order"] = order
             save_settings(self.settings)
             self.refresh_folder_table()
