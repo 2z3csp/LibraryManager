@@ -1306,10 +1306,11 @@ class MainWindow(QMainWindow):
         btn_batch_register = QPushButton("一括登録")
         btn_batch_register.clicked.connect(self.on_batch_register)
 
-        tree_button_row = QHBoxLayout()
-        tree_button_row.addWidget(btn_register)
-        tree_button_row.addWidget(btn_batch_register)
-        tree_button_row.addStretch(1)
+        tree_header_row = QHBoxLayout()
+        tree_header_row.addWidget(tree_title)
+        tree_header_row.addStretch(1)
+        tree_header_row.addWidget(btn_register)
+        tree_header_row.addWidget(btn_batch_register)
 
         self.category_tree = CategoryTreeWidget()
         self.category_tree.setHeaderHidden(True)
@@ -1323,8 +1324,7 @@ class MainWindow(QMainWindow):
         self.category_tree.itemChanged.connect(self.on_category_tree_item_changed)
         self.category_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.category_tree.customContextMenuRequested.connect(self.on_category_tree_context_menu)
-        tree_layout.addWidget(tree_title)
-        tree_layout.addLayout(tree_button_row)
+        tree_layout.addLayout(tree_header_row)
         tree_layout.addWidget(self.category_tree)
         splitter.addWidget(tree_box)
 
@@ -1335,8 +1335,9 @@ class MainWindow(QMainWindow):
 
         folders_title = QLabel("フォルダリスト")
 
-        folders_button_row = QHBoxLayout()
-        folders_button_row.addStretch(1)
+        folders_header_row = QHBoxLayout()
+        folders_header_row.addWidget(folders_title)
+        folders_header_row.addStretch(1)
 
         self.folders_table = QTableWidget(0, 2)
         self.folders_table.setHorizontalHeaderLabels(["登録名（ダブルクリックで開く）", "最終更新日"])
@@ -1349,8 +1350,7 @@ class MainWindow(QMainWindow):
         self.folders_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.folders_table.customContextMenuRequested.connect(self.on_folders_table_context_menu)
 
-        left_layout.addWidget(folders_title)
-        left_layout.addLayout(folders_button_row)
+        left_layout.addLayout(folders_header_row)
         left_layout.addWidget(self.folders_table)
         splitter.addWidget(left_box)
 
@@ -1367,10 +1367,11 @@ class MainWindow(QMainWindow):
         btn_replace = QPushButton("差し替え")
         btn_replace.clicked.connect(self.on_replace)
 
-        files_button_row = QHBoxLayout()
-        files_button_row.addWidget(btn_update)
-        files_button_row.addWidget(btn_replace)
-        files_button_row.addStretch(1)
+        files_header_row = QHBoxLayout()
+        files_header_row.addWidget(files_title)
+        files_header_row.addStretch(1)
+        files_header_row.addWidget(btn_update)
+        files_header_row.addWidget(btn_replace)
 
         self.files_table = QTableWidget(0, 6)
         self.files_table.setHorizontalHeaderLabels(["", "ファイル（最新）", "rev", "更新日", "更新者", "DocKey"])
@@ -1388,8 +1389,7 @@ class MainWindow(QMainWindow):
         self.files_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.files_table.customContextMenuRequested.connect(self.on_files_table_context_menu)
 
-        mid_layout.addWidget(files_title)
-        mid_layout.addLayout(files_button_row)
+        mid_layout.addLayout(files_header_row)
         mid_layout.addWidget(self.files_table)
         splitter.addWidget(mid_box)
 
