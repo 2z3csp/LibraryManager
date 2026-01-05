@@ -1566,13 +1566,14 @@ class MainWindow(QMainWindow):
     def category_order(self) -> Dict[str, Any]:
         order = self.settings.get("category_order")
         if not isinstance(order, dict):
-            order = {"categories": {}, "folder": {}}
+            order = {"categories": {}, "folder": {}, "tree": {}}
             self.settings["category_order"] = order
         if "main" in order or "sub" in order:
             order = self.migrate_category_order(order)
             self.settings["category_order"] = order
         order.setdefault("categories", {})
         order.setdefault("folder", {})
+        order.setdefault("tree", {})
         return order
 
     def category_check_states(self) -> Dict[str, bool]:
@@ -1817,10 +1818,21 @@ class MainWindow(QMainWindow):
             ]
             if not order["categories"][parent_key]:
                 order["categories"].pop(parent_key, None)
+        if path and parent_key in order.get("tree", {}):
+            order["tree"][parent_key] = [
+                entry for entry in order["tree"][parent_key]
+                if isinstance(entry, dict)
+                and not (entry.get("type") == "category" and entry.get("name") == path[-1])
+            ]
+            if not order["tree"][parent_key]:
+                order["tree"].pop(parent_key, None)
         prefix = f"{target_key}{CATEGORY_PATH_SEP}" if target_key else ""
         for key in list(order.get("categories", {}).keys()):
             if key == target_key or (prefix and key.startswith(prefix)):
                 order["categories"].pop(key, None)
+        for key in list(order.get("tree", {}).keys()):
+            if key == target_key or (prefix and key.startswith(prefix)):
+                order["tree"].pop(key, None)
         for key in list(order.get("folder", {}).keys()):
             if key == target_key or (prefix and key.startswith(prefix)):
                 order["folder"].pop(key, None)
@@ -1933,7 +1945,15 @@ class MainWindow(QMainWindow):
                 list(node["children"].keys()),
                 order.get("categories", {}).get(key, []),
             )
-            for name in child_names:
+            folder_order = order.get("folder", {}).get(key, [])
+            folder_mapping = {folder["path"]: folder for folder in node["folders"]}
+            remaining_folders = self.folders_sorted_for_category(node["folders"], folder_order)
+            remaining_categories = list(child_names)
+            added_categories: set[str] = set()
+            added_folders: set[str] = set()
+
+            def add_category(name: str) -> None:
+                nonlocal has_unchecked
                 child_node = node["children"][name]
                 child_item = QTreeWidgetItem([name])
                 child_path = path + [name]
@@ -1951,8 +1971,8 @@ class MainWindow(QMainWindow):
                     child_item.setForeground(0, QBrush(UNCHECKED_COLOR))
                     has_unchecked = True
 
-            folder_order = order.get("folder", {}).get(key, [])
-            for folder in self.folders_sorted_for_category(node["folders"], folder_order):
+            def add_folder(folder: Dict[str, str]) -> None:
+                nonlocal has_unchecked
                 folder_item = QTreeWidgetItem([folder["name"]])
                 folder_item.setToolTip(0, folder["path"])
                 folder_item.setFlags(folder_item.flags() | Qt.ItemIsUserCheckable)
@@ -1973,6 +1993,35 @@ class MainWindow(QMainWindow):
                     self.category_tree.addTopLevelItem(folder_item)
                 else:
                     parent_item.addChild(folder_item)
+
+            tree_order = order.get("tree", {}).get(key, [])
+            if isinstance(tree_order, list):
+                for entry in tree_order:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_type = entry.get("type")
+                    if entry_type == "category":
+                        name = entry.get("name")
+                        if isinstance(name, str) and name in node["children"] and name not in added_categories:
+                            add_category(name)
+                            added_categories.add(name)
+                    elif entry_type == "folder":
+                        folder_path = entry.get("path")
+                        if isinstance(folder_path, str) and folder_path in folder_mapping and folder_path not in added_folders:
+                            add_folder(folder_mapping[folder_path])
+                            added_folders.add(folder_path)
+
+            for name in remaining_categories:
+                if name in added_categories:
+                    continue
+                add_category(name)
+                added_categories.add(name)
+
+            for folder in remaining_folders:
+                if folder["path"] in added_folders:
+                    continue
+                add_folder(folder)
+                added_folders.add(folder["path"])
             return has_unchecked if highlight_enabled else False
 
         add_nodes(None, root, [], True)
@@ -1992,24 +2041,29 @@ class MainWindow(QMainWindow):
         self.refresh_category_tree()
 
     def update_category_order_from_tree(self):
-        order = {"categories": {}, "folder": {}}
+        order = {"categories": {}, "folder": {}, "tree": {}}
 
         def walk(item: QTreeWidgetItem, path: List[str]):
             category_order = []
             folder_order = []
+            tree_order = []
             for i in range(item.childCount()):
                 child = item.child(i)
                 data = child.data(0, Qt.UserRole) or {}
                 if data.get("type") == "category":
                     category_order.append(child.text(0))
+                    tree_order.append({"type": "category", "name": child.text(0)})
                 elif data.get("type") == "folder":
                     folder_path = data.get("path")
                     if folder_path:
                         folder_order.append(folder_path)
+                        tree_order.append({"type": "folder", "path": folder_path})
             if category_order:
                 order["categories"][self.category_path_key(path)] = category_order
             if folder_order:
                 order["folder"][self.category_path_key(path)] = folder_order
+            if tree_order:
+                order["tree"][self.category_path_key(path)] = tree_order
             for i in range(item.childCount()):
                 child = item.child(i)
                 data = child.data(0, Qt.UserRole) or {}
@@ -2018,20 +2072,25 @@ class MainWindow(QMainWindow):
 
         root_categories = []
         root_folders = []
+        root_tree = []
         for i in range(self.category_tree.topLevelItemCount()):
             top = self.category_tree.topLevelItem(i)
             data = top.data(0, Qt.UserRole) or {}
             if data.get("type") == "category":
                 root_categories.append(top.text(0))
+                root_tree.append({"type": "category", "name": top.text(0)})
                 walk(top, [top.text(0)])
             elif data.get("type") == "folder":
                 path = data.get("path")
                 if path:
                     root_folders.append(path)
+                    root_tree.append({"type": "folder", "path": path})
         if root_categories:
             order["categories"][self.category_path_key([])] = root_categories
         if root_folders:
             order["folder"][self.category_path_key([])] = root_folders
+        if root_tree:
+            order["tree"][self.category_path_key([])] = root_tree
         self.settings["category_order"] = order
         save_settings(self.settings)
 
@@ -2238,18 +2297,29 @@ class MainWindow(QMainWindow):
                 category_path = []
             parent_item = item.parent()
             current_category_order = []
+            current_tree_order = []
             if parent_item is None:
                 for i in range(self.category_tree.topLevelItemCount()):
                     top = self.category_tree.topLevelItem(i)
                     top_data = top.data(0, Qt.UserRole) or {}
                     if top_data.get("type") == "category":
                         current_category_order.append(top.text(0))
+                        current_tree_order.append({"type": "category", "name": top.text(0)})
+                    elif top_data.get("type") == "folder":
+                        top_path = top_data.get("path")
+                        if top_path:
+                            current_tree_order.append({"type": "folder", "path": top_path})
             else:
                 for i in range(parent_item.childCount()):
                     child = parent_item.child(i)
                     child_data = child.data(0, Qt.UserRole) or {}
                     if child_data.get("type") == "category":
                         current_category_order.append(child.text(0))
+                        current_tree_order.append({"type": "category", "name": child.text(0)})
+                    elif child_data.get("type") == "folder":
+                        child_path = child_data.get("path")
+                        if child_path:
+                            current_tree_order.append({"type": "folder", "path": child_path})
             base_categories = normalize_category_path(category_path)
             if not self.run_batch_register(root_path, 1, base_categories=base_categories):
                 return
@@ -2276,6 +2346,21 @@ class MainWindow(QMainWindow):
                 current_category_order.append(folder_name)
             if current_category_order:
                 order["categories"][key] = current_category_order
+            if current_tree_order:
+                updated_tree = []
+                replaced = False
+                for entry in current_tree_order:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("type") == "folder" and os.path.normcase(str(entry.get("path", ""))) == os.path.normcase(root_path):
+                        updated_tree.append({"type": "category", "name": folder_name})
+                        replaced = True
+                    else:
+                        updated_tree.append(entry)
+                if not replaced:
+                    updated_tree.append({"type": "category", "name": folder_name})
+                order.setdefault("tree", {})
+                order["tree"][key] = updated_tree
             self.settings["category_order"] = order
             save_settings(self.settings)
             self.refresh_folder_table()
