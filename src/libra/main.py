@@ -1467,6 +1467,12 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.warn(f"エクスプローラーで開けませんでした: {e}")
 
+    def strip_icon_prefix(self, text: str) -> str:
+        for prefix in ("🔖 ", "📁 "):
+            if text.startswith(prefix):
+                return text[len(prefix):]
+        return text
+
     def category_path_key(self, path: List[str]) -> str:
         return CATEGORY_PATH_SEP.join(path)
 
@@ -2165,8 +2171,6 @@ class MainWindow(QMainWindow):
 
         add_nodes(None, root, [], True)
 
-        if expanded_paths is None:
-            self.category_tree.expandAll()
         self.category_tree.blockSignals(False)
         self._category_tree_refreshing = False
 
@@ -2191,8 +2195,13 @@ class MainWindow(QMainWindow):
                 child = item.child(i)
                 data = child.data(0, Qt.UserRole) or {}
                 if data.get("type") == "category":
-                    category_order.append(child.text(0))
-                    tree_order.append({"type": "category", "name": child.text(0)})
+                    child_path = data.get("path")
+                    if isinstance(child_path, list) and child_path:
+                        name = child_path[-1]
+                    else:
+                        name = self.strip_icon_prefix(child.text(0))
+                    category_order.append(name)
+                    tree_order.append({"type": "category", "name": name})
                 elif data.get("type") == "folder":
                     folder_path = data.get("path")
                     if folder_path:
@@ -2208,7 +2217,12 @@ class MainWindow(QMainWindow):
                 child = item.child(i)
                 data = child.data(0, Qt.UserRole) or {}
                 if data.get("type") == "category":
-                    walk(child, path + [child.text(0)])
+                    child_path = data.get("path")
+                    if isinstance(child_path, list) and child_path:
+                        name = child_path[-1]
+                    else:
+                        name = self.strip_icon_prefix(child.text(0))
+                    walk(child, path + [name])
 
         root_categories = []
         root_folders = []
@@ -2217,9 +2231,14 @@ class MainWindow(QMainWindow):
             top = self.category_tree.topLevelItem(i)
             data = top.data(0, Qt.UserRole) or {}
             if data.get("type") == "category":
-                root_categories.append(top.text(0))
-                root_tree.append({"type": "category", "name": top.text(0)})
-                walk(top, [top.text(0)])
+                top_path = data.get("path")
+                if isinstance(top_path, list) and top_path:
+                    name = top_path[-1]
+                else:
+                    name = self.strip_icon_prefix(top.text(0))
+                root_categories.append(name)
+                root_tree.append({"type": "category", "name": name})
+                walk(top, [name])
             elif data.get("type") == "folder":
                 path = data.get("path")
                 if path:
@@ -2430,7 +2449,7 @@ class MainWindow(QMainWindow):
         elif action == act_register_as_category:
             root_path = data.get("path")
             category_path = data.get("category_path", [])
-            folder_name = item.text(0).strip()
+            folder_name = ""
             if not isinstance(root_path, str) or not root_path:
                 return
             if not isinstance(category_path, list):
@@ -2443,8 +2462,13 @@ class MainWindow(QMainWindow):
                     top = self.category_tree.topLevelItem(i)
                     top_data = top.data(0, Qt.UserRole) or {}
                     if top_data.get("type") == "category":
-                        current_category_order.append(top.text(0))
-                        current_tree_order.append({"type": "category", "name": top.text(0)})
+                        top_path = top_data.get("path")
+                        if isinstance(top_path, list) and top_path:
+                            name = top_path[-1]
+                        else:
+                            name = self.strip_icon_prefix(top.text(0))
+                        current_category_order.append(name)
+                        current_tree_order.append({"type": "category", "name": name})
                     elif top_data.get("type") == "folder":
                         top_path = top_data.get("path")
                         if top_path:
@@ -2454,8 +2478,13 @@ class MainWindow(QMainWindow):
                     child = parent_item.child(i)
                     child_data = child.data(0, Qt.UserRole) or {}
                     if child_data.get("type") == "category":
-                        current_category_order.append(child.text(0))
-                        current_tree_order.append({"type": "category", "name": child.text(0)})
+                        child_path = child_data.get("path")
+                        if isinstance(child_path, list) and child_path:
+                            name = child_path[-1]
+                        else:
+                            name = self.strip_icon_prefix(child.text(0))
+                        current_category_order.append(name)
+                        current_tree_order.append({"type": "category", "name": name})
                     elif child_data.get("type") == "folder":
                         child_path = child_data.get("path")
                         if child_path:
@@ -2463,8 +2492,10 @@ class MainWindow(QMainWindow):
             base_categories = normalize_category_path(category_path)
             if not self.run_batch_register(root_path, 1, base_categories=base_categories):
                 return
+            removed_item_name = ""
             idx = self.registry_index_by_path(root_path)
             if idx >= 0:
+                removed_item_name = str(self.registry[idx].get("name", "") or "")
                 self.registry.pop(idx)
                 self.remove_user_checks_for_paths({root_path})
                 save_registry(self.registry)
@@ -2472,6 +2503,10 @@ class MainWindow(QMainWindow):
                     self.current_folder = None
                     self.current_meta = None
                     self.current_file_rows = []
+            if removed_item_name:
+                folder_name = removed_item_name
+            if not folder_name:
+                folder_name = self.strip_icon_prefix(item.text(0).strip())
             if not folder_name:
                 folder_name = self.root_category_name(root_path)
             order = self.category_order()
