@@ -1438,7 +1438,6 @@ class MainWindow(QMainWindow):
         self.current_user = user_name()
         self._category_tree_refreshing = False
         self._category_tree_refresh_pending = False
-        self._show_folders_for_category_selection = False
 
         self.startup_rescan()
         self.refresh_folder_table()
@@ -1952,44 +1951,61 @@ class MainWindow(QMainWindow):
                 list(node["children"].keys()),
                 order.get("categories", {}).get(key, []),
             )
+            folder_order = order.get("folder", {}).get(key, [])
+            folder_mapping = {folder["path"]: folder for folder in node["folders"]}
+            remaining_folders = self.folders_sorted_for_category(node["folders"], folder_order)
             tree_order = order.get("tree", {}).get(key, [])
-            ordered_children: List[str] = []
-            added_children: set[str] = set()
+            ordered_entries: List[Dict[str, Any]] = []
+            added_categories: set[str] = set()
+            added_folders: set[str] = set()
             if isinstance(tree_order, list):
                 for entry in tree_order:
                     if not isinstance(entry, dict):
                         continue
-                    if entry.get("type") == "category":
+                    entry_type = entry.get("type")
+                    if entry_type == "category":
                         name = entry.get("name")
-                        if isinstance(name, str) and name in node["children"] and name not in added_children:
-                            ordered_children.append(name)
-                            added_children.add(name)
-            for name in child_names:
-                if name not in added_children:
-                    ordered_children.append(name)
-                    added_children.add(name)
+                        if isinstance(name, str) and name in node["children"] and name not in added_categories:
+                            ordered_entries.append({"type": "category", "name": name})
+                            added_categories.add(name)
+                    elif entry_type == "folder":
+                        folder_path = entry.get("path")
+                        if isinstance(folder_path, str) and folder_path in folder_mapping and folder_path not in added_folders:
+                            folder = folder_mapping[folder_path]
+                            ordered_entries.append({"type": "folder", "name": folder["name"], "path": folder["path"]})
+                            added_folders.add(folder_path)
 
-            if ordered_children and not self._show_folders_for_category_selection:
-                for name in ordered_children:
-                    if query and query not in name.lower():
-                        continue
+            for name in child_names:
+                if name not in added_categories:
+                    ordered_entries.append({"type": "category", "name": name})
+                    added_categories.add(name)
+
+            for folder in remaining_folders:
+                if folder["path"] in added_folders:
+                    continue
+                ordered_entries.append({"type": "folder", "name": folder["name"], "path": folder["path"]})
+                added_folders.add(folder["path"])
+
+            for entry in ordered_entries:
+                entry_type = entry["type"]
+                name = entry["name"]
+                if query and query not in name.lower():
+                    continue
+                if entry_type == "category":
                     child_path = self.selected_category_path + [name]
                     items.append({
                         "type": "category",
                         "name": name,
                         "path": child_path,
                     })
-            else:
-                folder_order = order.get("folder", {}).get(key, [])
-                remaining_folders = self.folders_sorted_for_category(node["folders"], folder_order)
-                for folder in remaining_folders:
-                    if query and query not in folder["name"].lower():
-                        continue
+                elif entry_type == "folder":
+                    folder_path = entry["path"]
+                    folder_item = folder_mapping.get(folder_path)
                     items.append({
                         "type": "folder",
-                        "name": folder["name"],
-                        "path": folder["path"],
-                        "categories": self.category_path_for_item(folder),
+                        "name": name,
+                        "path": folder_path,
+                        "categories": self.category_path_for_item(folder_item) if folder_item else [],
                     })
 
         self.folders_table.setRowCount(0)
@@ -2081,13 +2097,12 @@ class MainWindow(QMainWindow):
                 child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable)
                 child_checked = self.is_category_checked(child_path)
                 child_item.setCheckState(0, Qt.Checked if child_checked else Qt.Unchecked)
-                if expanded_paths is not None:
-                    if self.category_path_key(child_path) in expanded_paths:
-                        child_item.setExpanded(True)
                 if parent_item is None:
                     self.category_tree.addTopLevelItem(child_item)
                 else:
                     parent_item.addChild(child_item)
+                if expanded_paths is not None and self.category_path_key(child_path) in expanded_paths:
+                    child_item.setExpanded(True)
                 child_highlight_enabled = highlight_enabled and child_checked
                 child_unchecked = add_nodes(child_item, child_node, child_path, child_highlight_enabled)
                 if child_unchecked and child_highlight_enabled:
@@ -2687,7 +2702,6 @@ class MainWindow(QMainWindow):
             path = data.get("path", [])
             if not isinstance(path, list):
                 return
-            self._show_folders_for_category_selection = False
             self.current_folder = None
             self.current_meta = None
             self.current_file_rows = []
@@ -2728,11 +2742,9 @@ class MainWindow(QMainWindow):
         item_type = data.get("type")
         if item_type == "category":
             self.selected_category_path = data.get("path", [])
-            self._show_folders_for_category_selection = False
             self.refresh_folder_table()
         elif item_type == "folder":
             self.selected_category_path = data.get("category_path", [])
-            self._show_folders_for_category_selection = True
             self.refresh_folder_table()
             self.select_folder_in_table(data.get("path", ""))
 
