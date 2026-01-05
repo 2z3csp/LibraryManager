@@ -1438,6 +1438,7 @@ class MainWindow(QMainWindow):
         self.current_user = user_name()
         self._category_tree_refreshing = False
         self._category_tree_refresh_pending = False
+        self._show_folders_for_category_selection = False
 
         self.startup_rescan()
         self.refresh_folder_table()
@@ -1881,73 +1882,7 @@ class MainWindow(QMainWindow):
         save_user_checks(self.user_checks)
 
     # ---------- refresh ----------
-    def refresh_folder_table(self):
-        preserve_path = self.current_folder["path"] if self.current_folder else None
-        self.folders_table.blockSignals(True)
-        query = self.search.text().strip().lower()
-        items = []
-        for x in self.registry:
-            if self.is_archived_path(self.category_path_for_item(x)):
-                continue
-            if query not in x["name"].lower():
-                continue
-            categories = self.category_path_for_item(x)
-            if self.selected_category_path:
-                if categories[:len(self.selected_category_path)] != self.selected_category_path:
-                    continue
-            items.append(x)
-
-        self.folders_table.setRowCount(0)
-
-        for item in items:
-            name = item["name"]
-            path = item["path"]
-            categories = self.category_path_for_item(item)
-            last_date = ""
-            highlight_enabled = (
-                self.is_category_highlight_enabled_for_path(categories)
-                and self.is_folder_tree_checked(path)
-            )
-            has_unchecked = highlight_enabled and self.folder_has_unchecked(path)
-
-            if os.path.isdir(path):
-                try:
-                    files = safe_list_files(path, self.ignore_types)
-                    latest_mtime = None
-                    for filename in files:
-                        file_path = os.path.join(path, filename)
-                        try:
-                            mtime = os.path.getmtime(file_path)
-                        except Exception:
-                            continue
-                        if latest_mtime is None or mtime > latest_mtime:
-                            latest_mtime = mtime
-                    if latest_mtime is not None:
-                        last_date = dt.datetime.fromtimestamp(latest_mtime).strftime("%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    pass
-
-            r = self.folders_table.rowCount()
-            self.folders_table.insertRow(r)
-
-            it_name = QTableWidgetItem(name)
-            it_name.setToolTip(path)
-            it_name.setData(Qt.UserRole, path)
-            self.set_item_unchecked_style(it_name, has_unchecked)
-
-            self.folders_table.setItem(r, 0, it_name)
-            self.folders_table.setItem(r, 1, QTableWidgetItem(last_date))
-
-        self.folders_table.repaint()
-        self.folders_table.blockSignals(False)
-        if preserve_path:
-            self.select_folder_in_table(preserve_path)
-
-    def refresh_category_tree(self):
-        self._category_tree_refreshing = True
-        self.category_tree.blockSignals(True)
-        self.category_tree.clear()
-        order = self.category_order()
+    def build_category_tree_root(self) -> Dict[str, Any]:
         root = {"children": {}, "folders": []}
         for item in self.registry:
             categories = self.category_path_for_item(item)
@@ -1957,6 +1892,166 @@ class MainWindow(QMainWindow):
             for category in categories:
                 node = node["children"].setdefault(category, {"children": {}, "folders": []})
             node["folders"].append(item)
+        return root
+
+    def capture_expanded_category_paths(self) -> Optional[set[str]]:
+        if self.category_tree.topLevelItemCount() == 0:
+            return None
+
+        expanded: set[str] = set()
+
+        def walk(item: QTreeWidgetItem):
+            data = item.data(0, Qt.UserRole) or {}
+            if data.get("type") == "category":
+                path = data.get("path", [])
+                if isinstance(path, list) and item.isExpanded():
+                    expanded.add(self.category_path_key(path))
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self.category_tree.topLevelItemCount()):
+            walk(self.category_tree.topLevelItem(i))
+        return expanded
+
+    def find_category_tree_item(self, path: List[str]) -> Optional[QTreeWidgetItem]:
+        def walk(item: QTreeWidgetItem) -> Optional[QTreeWidgetItem]:
+            data = item.data(0, Qt.UserRole) or {}
+            if data.get("type") == "category" and data.get("path") == path:
+                return item
+            for i in range(item.childCount()):
+                found = walk(item.child(i))
+                if found:
+                    return found
+            return None
+
+        for i in range(self.category_tree.topLevelItemCount()):
+            found = walk(self.category_tree.topLevelItem(i))
+            if found:
+                return found
+        return None
+
+    def refresh_folder_table(self):
+        preserve_key: Optional[Tuple[str, str]] = None
+        if self.current_folder:
+            preserve_key = ("folder", self.current_folder["path"])
+        self.folders_table.blockSignals(True)
+        query = self.search.text().strip().lower()
+        items: List[Dict[str, Any]] = []
+        root = self.build_category_tree_root()
+        node = root
+        for category in self.selected_category_path:
+            if category not in node["children"]:
+                node = None
+                break
+            node = node["children"][category]
+
+        if node is not None:
+            order = self.category_order()
+            key = self.category_path_key(self.selected_category_path)
+            child_names = self.ordered_list(
+                list(node["children"].keys()),
+                order.get("categories", {}).get(key, []),
+            )
+            tree_order = order.get("tree", {}).get(key, [])
+            ordered_children: List[str] = []
+            added_children: set[str] = set()
+            if isinstance(tree_order, list):
+                for entry in tree_order:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("type") == "category":
+                        name = entry.get("name")
+                        if isinstance(name, str) and name in node["children"] and name not in added_children:
+                            ordered_children.append(name)
+                            added_children.add(name)
+            for name in child_names:
+                if name not in added_children:
+                    ordered_children.append(name)
+                    added_children.add(name)
+
+            if ordered_children and not self._show_folders_for_category_selection:
+                for name in ordered_children:
+                    if query and query not in name.lower():
+                        continue
+                    child_path = self.selected_category_path + [name]
+                    items.append({
+                        "type": "category",
+                        "name": name,
+                        "path": child_path,
+                    })
+            else:
+                folder_order = order.get("folder", {}).get(key, [])
+                remaining_folders = self.folders_sorted_for_category(node["folders"], folder_order)
+                for folder in remaining_folders:
+                    if query and query not in folder["name"].lower():
+                        continue
+                    items.append({
+                        "type": "folder",
+                        "name": folder["name"],
+                        "path": folder["path"],
+                        "categories": self.category_path_for_item(folder),
+                    })
+
+        self.folders_table.setRowCount(0)
+
+        for item in items:
+            item_type = item.get("type")
+            name = item["name"]
+            path = item["path"]
+            last_date = ""
+            has_unchecked = False
+            if item_type == "folder":
+                categories = item.get("categories") or []
+                highlight_enabled = (
+                    self.is_category_highlight_enabled_for_path(categories)
+                    and self.is_folder_tree_checked(path)
+                )
+                has_unchecked = highlight_enabled and self.folder_has_unchecked(path)
+
+                if os.path.isdir(path):
+                    try:
+                        files = safe_list_files(path, self.ignore_types)
+                        latest_mtime = None
+                        for filename in files:
+                            file_path = os.path.join(path, filename)
+                            try:
+                                mtime = os.path.getmtime(file_path)
+                            except Exception:
+                                continue
+                            if latest_mtime is None or mtime > latest_mtime:
+                                latest_mtime = mtime
+                        if latest_mtime is not None:
+                            last_date = dt.datetime.fromtimestamp(latest_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        pass
+
+            r = self.folders_table.rowCount()
+            self.folders_table.insertRow(r)
+
+            it_name = QTableWidgetItem(name)
+            if item_type == "folder":
+                it_name.setToolTip(path)
+                it_name.setData(Qt.UserRole, path)
+            else:
+                it_name.setData(Qt.UserRole, {"type": "category", "path": path})
+            self.set_item_unchecked_style(it_name, has_unchecked)
+
+            self.folders_table.setItem(r, 0, it_name)
+            self.folders_table.setItem(r, 1, QTableWidgetItem(last_date))
+
+        self.folders_table.repaint()
+        self.folders_table.blockSignals(False)
+        if preserve_key:
+            if preserve_key[0] == "folder":
+                self.select_folder_in_table(preserve_key[1])
+
+    def refresh_category_tree(self):
+        self._category_tree_refreshing = True
+        expanded_paths = self.capture_expanded_category_paths()
+        self.category_tree.blockSignals(True)
+        self.category_tree.clear()
+        order = self.category_order()
+        root = self.build_category_tree_root()
 
         def add_nodes(
             parent_item: Optional[QTreeWidgetItem],
@@ -1986,6 +2081,9 @@ class MainWindow(QMainWindow):
                 child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable)
                 child_checked = self.is_category_checked(child_path)
                 child_item.setCheckState(0, Qt.Checked if child_checked else Qt.Unchecked)
+                if expanded_paths is not None:
+                    if self.category_path_key(child_path) in expanded_paths:
+                        child_item.setExpanded(True)
                 if parent_item is None:
                     self.category_tree.addTopLevelItem(child_item)
                 else:
@@ -2051,7 +2149,8 @@ class MainWindow(QMainWindow):
 
         add_nodes(None, root, [], True)
 
-        self.category_tree.expandAll()
+        if expanded_paths is None:
+            self.category_tree.expandAll()
         self.category_tree.blockSignals(False)
         self._category_tree_refreshing = False
 
@@ -2583,7 +2682,23 @@ class MainWindow(QMainWindow):
         it = self.folders_table.item(idx, 0)
         if not it:
             return
-        path = it.data(Qt.UserRole)
+        data = it.data(Qt.UserRole)
+        if isinstance(data, dict) and data.get("type") == "category":
+            path = data.get("path", [])
+            if not isinstance(path, list):
+                return
+            self._show_folders_for_category_selection = False
+            self.current_folder = None
+            self.current_meta = None
+            self.current_file_rows = []
+            self.files_table.setRowCount(0)
+            tree_item = self.find_category_tree_item(path)
+            if tree_item:
+                self.category_tree.setCurrentItem(tree_item)
+                tree_item.setExpanded(True)
+            return
+
+        path = data
         name = it.text()
         self.current_folder = {"name": name, "path": path}
         self.refresh_files_table()
@@ -2591,7 +2706,17 @@ class MainWindow(QMainWindow):
     def on_folder_double_clicked(self, item: QTableWidgetItem):
         if item.column() != 0:
             return
-        path = item.data(Qt.UserRole)
+        data = item.data(Qt.UserRole)
+        if isinstance(data, dict) and data.get("type") == "category":
+            path = data.get("path", [])
+            if not isinstance(path, list):
+                return
+            tree_item = self.find_category_tree_item(path)
+            if tree_item:
+                self.category_tree.setCurrentItem(tree_item)
+                tree_item.setExpanded(True)
+            return
+        path = data
         if path and os.path.isdir(path):
             self.open_in_explorer(path)
 
@@ -2603,9 +2728,11 @@ class MainWindow(QMainWindow):
         item_type = data.get("type")
         if item_type == "category":
             self.selected_category_path = data.get("path", [])
+            self._show_folders_for_category_selection = False
             self.refresh_folder_table()
         elif item_type == "folder":
             self.selected_category_path = data.get("category_path", [])
+            self._show_folders_for_category_selection = True
             self.refresh_folder_table()
             self.select_folder_in_table(data.get("path", ""))
 
