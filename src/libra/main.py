@@ -2044,7 +2044,8 @@ class MainWindow(QMainWindow):
             r = self.folders_table.rowCount()
             self.folders_table.insertRow(r)
 
-            it_name = QTableWidgetItem(name)
+            icon_prefix = "🔖 " if item_type == "category" else "📁 "
+            it_name = QTableWidgetItem(f"{icon_prefix}{name}")
             if item_type == "folder":
                 it_name.setToolTip(path)
                 it_name.setData(Qt.UserRole, path)
@@ -2091,7 +2092,7 @@ class MainWindow(QMainWindow):
             def add_category(name: str) -> None:
                 nonlocal has_unchecked
                 child_node = node["children"][name]
-                child_item = QTreeWidgetItem([name])
+                child_item = QTreeWidgetItem([f"🔖 {name}"])
                 child_path = path + [name]
                 child_item.setData(0, Qt.UserRole, {"type": "category", "path": child_path})
                 child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable)
@@ -2111,7 +2112,7 @@ class MainWindow(QMainWindow):
 
             def add_folder(folder: Dict[str, str]) -> None:
                 nonlocal has_unchecked
-                folder_item = QTreeWidgetItem([folder["name"]])
+                folder_item = QTreeWidgetItem([f"📁 {folder['name']}"])
                 folder_item.setToolTip(0, folder["path"])
                 folder_item.setFlags(folder_item.flags() | Qt.ItemIsUserCheckable)
                 folder_checked = self.is_folder_tree_checked(folder["path"])
