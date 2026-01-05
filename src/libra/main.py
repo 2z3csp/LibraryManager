@@ -97,6 +97,11 @@ CATEGORY_PATH_SEP = "\u001f"
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ASSET_DIR = os.path.join(ROOT_DIR, "assets")
 APP_ICON_PATH = os.path.join(ASSET_DIR, "icons", "Libra.ico")
+DEFAULT_VERSION_RULES = {
+    "major": "客先提示時に更新",
+    "minor": "社内・社外提示時に更新",
+    "patch": "編集時に更新",
+}
 
 
 def load_app_icon() -> Optional[QIcon]:
@@ -158,6 +163,7 @@ def load_settings() -> Dict[str, Any]:
             "bak": True,
             "log": True,
         },
+        "version_rules": DEFAULT_VERSION_RULES,
     }
     if not os.path.exists(SETTINGS_PATH):
         return defaults
@@ -370,6 +376,16 @@ def normalize_ignore_types(ignore_types: Optional[Dict[str, Any]]) -> Dict[str, 
         if key in ignore_types:
             merged[key] = bool(ignore_types[key])
     return merged
+
+
+def normalize_version_rules(version_rules: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    if not isinstance(version_rules, dict):
+        return DEFAULT_VERSION_RULES.copy()
+    normalized = DEFAULT_VERSION_RULES.copy()
+    for key in normalized:
+        if key in version_rules:
+            normalized[key] = str(version_rules[key]).strip()
+    return normalized
 
 
 def should_ignore_file(filename: str, ignore_types: Dict[str, bool]) -> bool:
@@ -841,13 +857,19 @@ class ArchiveDialog(QDialog):
 
 
 class VersionSelectDialog(QDialog):
-    def __init__(self, current_rev: str, parent: QWidget | None = None):
+    def __init__(
+        self,
+        current_rev: str,
+        version_rules: Optional[Dict[str, Any]] = None,
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("更新")
         self.setMinimumWidth(420)
 
         self.current_rev = current_rev
         self.current_version = parse_rev_numbers(current_rev)
+        self.version_rules = normalize_version_rules(version_rules)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -865,9 +887,9 @@ class VersionSelectDialog(QDialog):
 
         self.bump_group = QGroupBox("バージョンの選択")
         bump_layout = QVBoxLayout(self.bump_group)
-        self.radio_major = QRadioButton("メジャーバージョン：客先提示時に更新")
-        self.radio_minor = QRadioButton("マイナーバージョン：社内・社外提示時に更新")
-        self.radio_patch = QRadioButton("パッチバージョン：編集時に更新")
+        self.radio_major = QRadioButton(f"メジャーバージョン：{self.version_rules['major']}")
+        self.radio_minor = QRadioButton(f"マイナーバージョン：{self.version_rules['minor']}")
+        self.radio_patch = QRadioButton(f"パッチバージョン：{self.version_rules['patch']}")
         self.radio_patch.setChecked(True)
         bump_layout.addWidget(self.radio_major)
         bump_layout.addWidget(self.radio_minor)
@@ -1204,6 +1226,7 @@ class OptionsDialog(QDialog):
         self,
         timeout_min: int,
         ignore_types: Optional[Dict[str, Any]] = None,
+        version_rules: Optional[Dict[str, Any]] = None,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
@@ -1217,6 +1240,17 @@ class OptionsDialog(QDialog):
         self.timeout_spin.setValue(timeout_min)
         form.addRow("メモ入力タイムアウト（分）", self.timeout_spin)
         layout.addLayout(form)
+
+        rules = normalize_version_rules(version_rules)
+        rules_group = QGroupBox("バージョンルール")
+        rules_form = QFormLayout(rules_group)
+        self.rule_major = QLineEdit(rules["major"])
+        self.rule_minor = QLineEdit(rules["minor"])
+        self.rule_patch = QLineEdit(rules["patch"])
+        rules_form.addRow("メジャーバージョン", self.rule_major)
+        rules_form.addRow("マイナーバージョン", self.rule_minor)
+        rules_form.addRow("パッチバージョン", self.rule_patch)
+        layout.addWidget(rules_group)
 
         ignore_flags = normalize_ignore_types(ignore_types)
         ignore_group = QGroupBox("無視するファイル種類")
@@ -1249,6 +1283,13 @@ class OptionsDialog(QDialog):
             "log": self.ignore_log.isChecked(),
         }
 
+    def get_version_rules(self) -> Dict[str, str]:
+        return normalize_version_rules({
+            "major": self.rule_major.text(),
+            "minor": self.rule_minor.text(),
+            "patch": self.rule_patch.text(),
+        })
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -1261,6 +1302,7 @@ class MainWindow(QMainWindow):
         self.user_checks = load_user_checks()
         self.memo_timeout_min = int(self.settings.get("memo_timeout_min", DEFAULT_MEMO_TIMEOUT_MIN))
         self.ignore_types = normalize_ignore_types(self.settings.get("ignore_types"))
+        self.version_rules = normalize_version_rules(self.settings.get("version_rules"))
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -2813,13 +2855,15 @@ class MainWindow(QMainWindow):
                 scan_folder(path, self.ignore_types)
 
     def on_options(self):
-        dlg = OptionsDialog(self.memo_timeout_min, self.ignore_types, self)
+        dlg = OptionsDialog(self.memo_timeout_min, self.ignore_types, self.version_rules, self)
         if dlg.exec() != QDialog.Accepted:
             return
         self.memo_timeout_min = dlg.get_timeout_min()
         self.ignore_types = normalize_ignore_types(dlg.get_ignore_types())
+        self.version_rules = normalize_version_rules(dlg.get_version_rules())
         self.settings["memo_timeout_min"] = self.memo_timeout_min
         self.settings["ignore_types"] = self.ignore_types
+        self.settings["version_rules"] = self.version_rules
         save_settings(self.settings)
         self.refresh_folder_table()
         self.refresh_files_table()
@@ -2890,7 +2934,7 @@ class MainWindow(QMainWindow):
             self.warn("現行ファイルが不明です。")
             return
 
-        version_dialog = VersionSelectDialog(cur_rev, self)
+        version_dialog = VersionSelectDialog(cur_rev, self.version_rules, self)
         if version_dialog.exec() != QDialog.Accepted:
             return
 
