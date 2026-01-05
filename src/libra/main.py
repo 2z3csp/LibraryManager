@@ -98,9 +98,9 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ASSET_DIR = os.path.join(ROOT_DIR, "assets")
 APP_ICON_PATH = os.path.join(ASSET_DIR, "icons", "Libra.ico")
 DEFAULT_VERSION_RULES = {
-    "major": "客先提示時に更新",
-    "minor": "社内・社外提示時に更新",
-    "patch": "編集時に更新",
+    "major": "",
+    "minor": "",
+    "patch": "",
 }
 
 
