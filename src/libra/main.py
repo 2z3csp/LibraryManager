@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QRadioButton,
     QCheckBox,
+    QTabWidget,
 )
 
 REV_RE = re.compile(
@@ -483,6 +484,10 @@ class CategoryTreeWidget(QTreeWidget):
         self.order_changed.emit()
 
 
+class DirectoryTreeWidget(QTreeWidget):
+    pass
+
+
 def scan_folder(
     folder_path: str,
     ignore_types: Optional[Dict[str, Any]] = None,
@@ -676,7 +681,7 @@ class RegisterDialog(QDialog):
 
 
 class BatchRegisterDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None, initial_path: str = ""):
         super().__init__(parent)
         self.setWindowTitle("一括登録")
         self.setMinimumWidth(520)
@@ -699,6 +704,9 @@ class BatchRegisterDialog(QDialog):
         form.addRow("対象ディレクトリ", path_row)
         form.addRow("取得階層", self.depth_spin)
         layout.addLayout(form)
+
+        if initial_path:
+            self.path_edit.setText(initial_path)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("OK")
@@ -1399,7 +1407,7 @@ class MainWindow(QMainWindow):
         tree_layout = QVBoxLayout(tree_box)
         tree_layout.setContentsMargins(0, 0, 0, 0)
 
-        tree_title = QLabel("カテゴリツリー")
+        tree_title = QLabel("ツリー")
 
         btn_register = QPushButton("個別登録")
         btn_register.clicked.connect(self.on_register)
@@ -1425,9 +1433,19 @@ class MainWindow(QMainWindow):
         self.category_tree.itemChanged.connect(self.on_category_tree_item_changed)
         self.category_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.category_tree.customContextMenuRequested.connect(self.on_category_tree_context_menu)
+
+        self.directory_tree = DirectoryTreeWidget()
+        self.directory_tree.setHeaderHidden(True)
+        self.directory_tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.directory_tree.itemSelectionChanged.connect(self.on_directory_tree_selected)
+        self.directory_tree.itemDoubleClicked.connect(self.on_directory_tree_double_clicked)
+
+        tree_tabs = QTabWidget()
+        tree_tabs.addTab(self.category_tree, "カテゴリ")
+        tree_tabs.addTab(self.directory_tree, "ディレクトリ")
         tree_layout.addWidget(tree_title)
         tree_layout.addLayout(tree_button_row)
-        tree_layout.addWidget(self.category_tree)
+        tree_layout.addWidget(tree_tabs)
         splitter.addWidget(tree_box)
 
         # Left-middle: registered folders table
@@ -1548,6 +1566,7 @@ class MainWindow(QMainWindow):
         self.startup_rescan()
         self.refresh_folder_table()
         self.refresh_category_tree()
+        self.refresh_directory_tree()
 
     # ---------- UI helpers ----------
     def info(self, msg: str):
@@ -1566,6 +1585,15 @@ class MainWindow(QMainWindow):
     def selected_file_index(self) -> int:
         sel = self.files_table.selectionModel().selectedRows()
         return sel[0].row() if sel else -1
+
+    def selected_directory_tree_path(self) -> Optional[str]:
+        items = self.directory_tree.selectedItems()
+        if not items:
+            return None
+        data = items[0].data(0, Qt.UserRole)
+        if isinstance(data, str):
+            return data
+        return None
 
     def open_in_explorer(self, path: str):
         try:
@@ -1906,6 +1934,7 @@ class MainWindow(QMainWindow):
         save_registry(self.registry)
         self.refresh_folder_table()
         self.refresh_category_tree()
+        self.refresh_directory_tree()
         if self.current_folder and os.path.normcase(self.current_folder["path"]) == os.path.normcase(old_path):
             self.current_folder = {"name": name, "path": new_path}
             self.refresh_files_table()
@@ -1926,6 +1955,7 @@ class MainWindow(QMainWindow):
             self.current_file_rows = []
         self.refresh_folder_table()
         self.refresh_category_tree()
+        self.refresh_directory_tree()
         self.refresh_files_table()
         self.info("削除しました。")
 
@@ -1982,6 +2012,7 @@ class MainWindow(QMainWindow):
             self.current_file_rows = []
         self.refresh_folder_table()
         self.refresh_category_tree()
+        self.refresh_directory_tree()
         self.refresh_files_table()
         self.info("削除しました。")
 
@@ -2305,6 +2336,100 @@ class MainWindow(QMainWindow):
 
         self.category_tree.blockSignals(False)
         self._category_tree_refreshing = False
+
+    def capture_directory_tree_state(self) -> Tuple[Optional[str], set[str]]:
+        selected_path = None
+        items = self.directory_tree.selectedItems()
+        if items:
+            data = items[0].data(0, Qt.UserRole)
+            if isinstance(data, str):
+                selected_path = data
+
+        expanded: set[str] = set()
+
+        def walk(item: QTreeWidgetItem):
+            path = item.data(0, Qt.UserRole)
+            if isinstance(path, str) and item.isExpanded():
+                expanded.add(os.path.normcase(path))
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self.directory_tree.topLevelItemCount()):
+            walk(self.directory_tree.topLevelItem(i))
+        return selected_path, expanded
+
+    def find_directory_tree_item(self, path: str) -> Optional[QTreeWidgetItem]:
+        target = os.path.normcase(path)
+
+        def walk(item: QTreeWidgetItem) -> Optional[QTreeWidgetItem]:
+            data = item.data(0, Qt.UserRole)
+            if isinstance(data, str) and os.path.normcase(data) == target:
+                return item
+            for i in range(item.childCount()):
+                found = walk(item.child(i))
+                if found:
+                    return found
+            return None
+
+        for i in range(self.directory_tree.topLevelItemCount()):
+            found = walk(self.directory_tree.topLevelItem(i))
+            if found:
+                return found
+        return None
+
+    def add_directory_tree_children(
+        self,
+        parent_item: QTreeWidgetItem,
+        parent_path: str,
+        expanded_paths: set[str],
+    ) -> None:
+        try:
+            entries = [entry for entry in os.scandir(parent_path) if entry.is_dir()]
+        except OSError:
+            return
+        entries.sort(key=lambda entry: entry.name.casefold())
+        for entry in entries:
+            if entry.name.lower() in {"_history", LEGACY_META_DIR.lower()}:
+                continue
+            child_item = QTreeWidgetItem([entry.name])
+            child_item.setData(0, Qt.UserRole, entry.path)
+            child_item.setToolTip(0, entry.path)
+            parent_item.addChild(child_item)
+            if os.path.normcase(entry.path) in expanded_paths:
+                child_item.setExpanded(True)
+            self.add_directory_tree_children(child_item, entry.path, expanded_paths)
+
+    def refresh_directory_tree(self):
+        selected_path, expanded_paths = self.capture_directory_tree_state()
+        self.directory_tree.blockSignals(True)
+        self.directory_tree.clear()
+
+        registry_items = sorted(
+            self.registry,
+            key=lambda item: str(item.get("name") or item.get("path") or "").casefold(),
+        )
+
+        for entry in registry_items:
+            root_path = entry.get("path", "")
+            if not isinstance(root_path, str) or not root_path:
+                continue
+            if not os.path.isdir(root_path):
+                continue
+            root_label = entry.get("name") or os.path.basename(os.path.normpath(root_path)) or root_path
+            root_item = QTreeWidgetItem([root_label])
+            root_item.setData(0, Qt.UserRole, root_path)
+            root_item.setToolTip(0, root_path)
+            self.directory_tree.addTopLevelItem(root_item)
+            if os.path.normcase(root_path) in expanded_paths:
+                root_item.setExpanded(True)
+            self.add_directory_tree_children(root_item, root_path, expanded_paths)
+
+        self.directory_tree.blockSignals(False)
+        if selected_path:
+            item = self.find_directory_tree_item(selected_path)
+            if item:
+                self.directory_tree.setCurrentItem(item)
+                item.setSelected(True)
 
     def schedule_category_tree_refresh(self):
         if self._category_tree_refresh_pending:
@@ -2753,6 +2878,7 @@ class MainWindow(QMainWindow):
             save_settings(self.settings)
             self.refresh_folder_table()
             self.refresh_category_tree()
+            self.refresh_directory_tree()
             self.refresh_files_table()
         elif action == act_delete:
             path = data.get("path")
@@ -3026,13 +3152,18 @@ class MainWindow(QMainWindow):
         save_registry(self.registry)
         self.refresh_folder_table()
         self.refresh_category_tree()
+        self.refresh_directory_tree()
         self.info("登録しました。")
 
     def on_register(self):
         self.open_register_dialog()
 
     def on_batch_register(self):
-        dlg = BatchRegisterDialog(self)
+        initial_path = ""
+        selected_path = self.selected_directory_tree_path()
+        if selected_path and os.path.isdir(selected_path):
+            initial_path = selected_path
+        dlg = BatchRegisterDialog(self, initial_path=initial_path)
         if dlg.exec() != QDialog.Accepted:
             return
         root_path = dlg.get_path()
@@ -3069,6 +3200,7 @@ class MainWindow(QMainWindow):
         save_registry(self.registry)
         self.refresh_folder_table()
         self.refresh_category_tree()
+        self.refresh_directory_tree()
         self.info(f"{len(selected_items)} 件を一括登録しました。")
         return True
 
@@ -3168,6 +3300,27 @@ class MainWindow(QMainWindow):
         if path and os.path.isdir(path):
             self.open_in_explorer(path)
 
+    def on_directory_tree_selected(self):
+        items = self.directory_tree.selectedItems()
+        if not items:
+            self.current_folder = None
+            self.current_meta = None
+            self.current_file_rows = []
+            self.files_table.setRowCount(0)
+            return
+        data = items[0].data(0, Qt.UserRole)
+        if not isinstance(data, str) or not data:
+            return
+        if not os.path.isdir(data):
+            return
+        self.current_folder = {"name": items[0].text(0), "path": data}
+        self.refresh_files_table()
+
+    def on_directory_tree_double_clicked(self, item: QTreeWidgetItem):
+        path = item.data(0, Qt.UserRole)
+        if path and os.path.isdir(path):
+            self.open_in_explorer(path)
+
     def on_file_selected(self):
         idx = self.selected_file_index()
         if idx < 0:
@@ -3192,6 +3345,7 @@ class MainWindow(QMainWindow):
         self.refresh_folder_table()
         self.refresh_files_table()
         self.refresh_category_tree()
+        self.refresh_directory_tree()
 
     def startup_rescan(self):
         for item in self.registry:
