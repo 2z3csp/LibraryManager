@@ -1418,6 +1418,7 @@ class MainWindow(QMainWindow):
         self.category_tree.setAcceptDrops(True)
         self.category_tree.setDropIndicatorShown(True)
         self.category_tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.category_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.category_tree.order_changed.connect(self.on_category_tree_order_changed)
         self.category_tree.itemSelectionChanged.connect(self.on_category_tree_selected)
         self.category_tree.itemDoubleClicked.connect(self.on_category_tree_double_clicked)
@@ -1444,11 +1445,11 @@ class MainWindow(QMainWindow):
         folders_button_row.addStretch(1)
 
         self.folders_table = QTableWidget(0, 2)
-        self.folders_table.setHorizontalHeaderLabels(["登録名（ダブルクリックで開く）", "最終更新日"])
+        self.folders_table.setHorizontalHeaderLabels(["登録名", "最終更新日"])
         self.folders_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.folders_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.folders_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.folders_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.folders_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.folders_table.itemSelectionChanged.connect(self.on_folder_selected)
         self.folders_table.itemDoubleClicked.connect(self.on_folder_double_clicked)
         self.folders_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1482,7 +1483,7 @@ class MainWindow(QMainWindow):
         files_button_row.addStretch(1)
 
         self.files_table = QTableWidget(0, 6)
-        self.files_table.setHorizontalHeaderLabels(["", "ファイル（最新）", "rev", "更新日", "更新者", "DocKey"])
+        self.files_table.setHorizontalHeaderLabels(["", "ファイル", "rev", "更新日", "更新者", "DocKey"])
         files_header_item = QTableWidgetItem("")
         files_header_item.setFlags(files_header_item.flags() | Qt.ItemIsUserCheckable)
         files_header_item.setCheckState(Qt.Unchecked)
@@ -1495,7 +1496,7 @@ class MainWindow(QMainWindow):
         self.files_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.files_table.horizontalHeader().sectionClicked.connect(self.on_files_header_clicked)
         self.files_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.files_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.files_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.files_table.itemSelectionChanged.connect(self.on_file_selected)
         self.files_table.itemDoubleClicked.connect(self.on_file_double_clicked)
         self.files_table.itemChanged.connect(self.on_file_check_changed)
@@ -1991,6 +1992,32 @@ class MainWindow(QMainWindow):
                 self.user_checks.pop(key, None)
         save_user_checks(self.user_checks)
 
+    def remove_user_checks_for_docs(self, folder_path: str, doc_keys: set[str]) -> None:
+        folder_key = self.folder_key(folder_path)
+        folder_checks = self.user_checks.get(folder_key, {})
+        if not folder_checks:
+            return
+        for doc_key in doc_keys:
+            folder_checks.pop(doc_key, None)
+        if folder_checks:
+            self.user_checks[folder_key] = folder_checks
+        else:
+            self.user_checks.pop(folder_key, None)
+        save_user_checks(self.user_checks)
+
+    def collapse_category_paths(self, paths: List[List[str]]) -> List[List[str]]:
+        unique: List[List[str]] = []
+        for path in paths:
+            if path not in unique:
+                unique.append(path)
+        unique.sort(key=len)
+        collapsed: List[List[str]] = []
+        for path in unique:
+            if any(path[:len(existing)] == existing for existing in collapsed):
+                continue
+            collapsed.append(path)
+        return collapsed
+
     # ---------- refresh ----------
     def build_category_tree_root(self) -> Dict[str, Any]:
         root = {"children": {}, "folders": []}
@@ -2148,7 +2175,7 @@ class MainWindow(QMainWindow):
                             if latest_mtime is None or mtime > latest_mtime:
                                 latest_mtime = mtime
                         if latest_mtime is not None:
-                            last_date = dt.datetime.fromtimestamp(latest_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                            last_date = dt.datetime.fromtimestamp(latest_mtime).strftime("%Y-%m-%d")
                     except Exception:
                         pass
 
@@ -2529,9 +2556,66 @@ class MainWindow(QMainWindow):
         elif action == act_delete:
             self.delete_registered_folder(path)
 
+    def selected_category_tree_paths(self) -> Tuple[List[List[str]], List[str]]:
+        category_paths: List[List[str]] = []
+        folder_paths: List[str] = []
+        for item in self.category_tree.selectedItems():
+            data = item.data(0, Qt.UserRole) or {}
+            item_type = data.get("type")
+            if item_type == "category":
+                path = data.get("path", [])
+                if isinstance(path, list) and path:
+                    category_paths.append(path)
+            elif item_type == "folder":
+                path = data.get("path")
+                if isinstance(path, str) and path:
+                    folder_paths.append(path)
+        return category_paths, folder_paths
+
+    def archive_selected_category_paths(self, paths: List[List[str]]) -> None:
+        collapsed = self.collapse_category_paths(paths)
+        changed = False
+        for path in collapsed:
+            if self.archive_category_path(path):
+                changed = True
+        if changed:
+            self.refresh_folder_table()
+            self.refresh_category_tree()
+
+    def delete_selected_category_tree_items(
+        self,
+        category_paths: List[List[str]],
+        folder_paths: List[str],
+    ) -> None:
+        collapsed_categories = self.collapse_category_paths(category_paths)
+        for path in collapsed_categories:
+            self.delete_category_hierarchy(path)
+        for path in folder_paths:
+            self.delete_registered_folder(path)
+
     def on_category_tree_context_menu(self, pos):
         item = self.category_tree.itemAt(pos)
         if not item:
+            return
+        if not item.isSelected():
+            self.category_tree.clearSelection()
+            item.setSelected(True)
+            self.category_tree.setCurrentItem(item)
+        selected_items = self.category_tree.selectedItems()
+        if len(selected_items) > 1:
+            category_paths, folder_paths = self.selected_category_tree_paths()
+            if not category_paths and not folder_paths:
+                return
+            menu = QMenu(self)
+            act_delete = menu.addAction("削除")
+            act_archive = None
+            if category_paths:
+                act_archive = menu.addAction("アーカイブ")
+            action = menu.exec(self.category_tree.viewport().mapToGlobal(pos))
+            if action == act_delete:
+                self.delete_selected_category_tree_items(category_paths, folder_paths)
+            elif action == act_archive:
+                self.archive_selected_category_paths(category_paths)
             return
         data = item.data(0, Qt.UserRole) or {}
         item_type = data.get("type")
@@ -2690,6 +2774,95 @@ class MainWindow(QMainWindow):
                 self.refresh_folder_table()
                 self.refresh_category_tree()
 
+    def selected_file_doc_keys(self) -> List[str]:
+        if not self.current_file_rows:
+            return []
+        rows = [idx.row() for idx in self.files_table.selectionModel().selectedRows()]
+        doc_keys: List[str] = []
+        for row in sorted(set(rows)):
+            if 0 <= row < len(self.current_file_rows):
+                doc_keys.append(self.current_file_rows[row].doc_key)
+        return doc_keys
+
+    def remove_selected_files(self, archive: bool) -> None:
+        if not self.current_folder:
+            self.warn("フォルダを選択してください。")
+            return
+        doc_keys = self.selected_file_doc_keys()
+        if not doc_keys:
+            self.warn("対象ファイル（最新）を選択してください。")
+            return
+        action_label = "アーカイブ" if archive else "削除"
+        if not self.ask(f"選択したファイル {len(doc_keys)} 件を{action_label}しますか？"):
+            return
+
+        folder_path = self.current_folder["path"]
+        meta = load_meta(folder_path)
+        docs = meta.get("documents", {})
+        if not isinstance(docs, dict):
+            self.warn("メタデータが見つかりません。再スキャンしてください。")
+            return
+
+        removed_keys: set[str] = set()
+        errors = []
+
+        for doc_key in doc_keys:
+            info = docs.get(doc_key)
+            if not isinstance(info, dict):
+                continue
+            cur_fn = info.get("current_file", "")
+            if cur_fn:
+                cur_path = os.path.join(folder_path, cur_fn)
+                try:
+                    if os.path.exists(cur_path):
+                        if archive:
+                            history_dir = ensure_history_dir(folder_path)
+                            dest_name = cur_fn
+                            dest_path = os.path.join(history_dir, dest_name)
+                            if os.path.exists(dest_path):
+                                ts = dt.datetime.now().strftime("%Y%m%d%H%M%S")
+                                base, ext = split_name_ext(cur_fn)
+                                dest_name = f"{base}_{ts}{ext}"
+                                dest_path = os.path.join(history_dir, dest_name)
+                            shutil.move(cur_path, dest_path)
+                        else:
+                            os.remove(cur_path)
+                except Exception as e:
+                    errors.append(f"{doc_key}: {e}")
+                    continue
+            if not archive:
+                history_items = info.get("history", [])
+                if isinstance(history_items, list):
+                    history_dir = ensure_history_dir(folder_path)
+                    for entry in history_items:
+                        if not isinstance(entry, dict):
+                            continue
+                        fname = entry.get("file", "")
+                        if not fname:
+                            continue
+                        try:
+                            fpath = os.path.join(history_dir, fname)
+                            if os.path.exists(fpath):
+                                os.remove(fpath)
+                        except Exception as e:
+                            errors.append(f"{doc_key}: {e}")
+            docs.pop(doc_key, None)
+            removed_keys.add(doc_key)
+
+        if removed_keys:
+            meta["documents"] = docs
+            save_meta(folder_path, meta)
+            self.remove_user_checks_for_docs(folder_path, removed_keys)
+            if self.current_folder and os.path.normcase(self.current_folder["path"]) == os.path.normcase(folder_path):
+                self.current_meta = meta
+            self.refresh_files_table()
+            self.refresh_folder_table()
+            self.refresh_category_tree()
+            self.info(f"{action_label}しました。")
+
+        if errors:
+            self.warn("処理時に一部エラーが発生しました:\n" + "\n".join(errors))
+
     def on_files_table_context_menu(self, pos):
         item = self.files_table.itemAt(pos)
         if not item:
@@ -2697,13 +2870,24 @@ class MainWindow(QMainWindow):
         row = item.row()
         if row < 0 or row >= len(self.current_file_rows):
             return
-        self.files_table.selectRow(row)
+        if not self.files_table.selectionModel().isRowSelected(row, self.files_table.rootIndex()):
+            self.files_table.clearSelection()
+            self.files_table.selectRow(row)
 
         menu = QMenu(self)
-        act_update = menu.addAction("更新")
-        act_replace = menu.addAction("差し替え")
-        act_rollback = menu.addAction("差し戻し")
-        act_history_clear = menu.addAction("History Clear")
+        selected_count = len(self.files_table.selectionModel().selectedRows())
+        act_update = None
+        act_replace = None
+        act_rollback = None
+        act_history_clear = None
+        if selected_count == 1:
+            act_update = menu.addAction("更新")
+            act_replace = menu.addAction("差し替え")
+            act_rollback = menu.addAction("差し戻し")
+            act_history_clear = menu.addAction("History Clear")
+            menu.addSeparator()
+        act_delete = menu.addAction("削除")
+        act_archive = menu.addAction("アーカイブ")
         action = menu.exec(self.files_table.viewport().mapToGlobal(pos))
         if action == act_update:
             self.on_update()
@@ -2713,6 +2897,10 @@ class MainWindow(QMainWindow):
             self.on_rollback()
         elif action == act_history_clear:
             self.on_history_clear()
+        elif action == act_delete:
+            self.remove_selected_files(archive=False)
+        elif action == act_archive:
+            self.remove_selected_files(archive=True)
 
     def open_current_file(self, folder_path: str, filename: str, doc_key: str) -> None:
         file_path = os.path.join(folder_path, filename)
