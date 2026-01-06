@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, List
 
 from PySide6.QtCore import Qt, QSize, QTimer, Signal
-from PySide6.QtGui import QAction, QBrush, QColor, QIcon
+from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -93,6 +93,8 @@ SETTINGS_PATH = os.path.join(appdata_dir(), "settings.json")
 USER_CHECKS_PATH = os.path.join(appdata_dir(), "user_checks.json")
 DEFAULT_MEMO_TIMEOUT_MIN = 30
 UNCHECKED_COLOR = QColor("#C0504D")
+NEW_FOLDER_BG_COLOR_LIGHT = QColor("#FFF2CC")
+NEW_FOLDER_BG_COLOR_DARK = QColor("#4C3B00")
 CATEGORY_PATH_SEP = "\u001f"
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ASSET_DIR = os.path.join(ROOT_DIR, "assets")
@@ -159,6 +161,8 @@ def load_settings() -> Dict[str, Any]:
         "category_order": {"categories": {}, "folder": {}},
         "archived_categories": [],
         "category_folder_paths": {},
+        "folder_subfolder_counts": {},
+        "ignored_scan_paths": [],
         "ignore_types": {
             "shortcut": True,
             "bak": True,
@@ -586,6 +590,7 @@ class RegisterDialog(QDialog):
         initial_categories: Optional[List[str]] = None,
         category_options: Optional[List[List[str]]] = None,
         ok_label: str = "登録",
+        subfolder_count: Optional[int] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("登録")
@@ -621,6 +626,9 @@ class RegisterDialog(QDialog):
         button_row.addWidget(self.add_category_button)
         category_box.addLayout(button_row)
         form.addRow("カテゴリ階層", category_box)
+        if subfolder_count is not None:
+            count_label = QLabel(str(subfolder_count))
+            form.addRow("配下フォルダ数", count_label)
 
         if initial_path:
             self.path_edit.setText(initial_path)
@@ -682,6 +690,7 @@ class CategoryEditDialog(QDialog):
         parent: QWidget | None = None,
         initial_name: str = "",
         initial_path: str = "",
+        subfolder_count: Optional[int] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("カテゴリ編集")
@@ -704,6 +713,9 @@ class CategoryEditDialog(QDialog):
 
         form.addRow("カテゴリ名", self.name_edit)
         form.addRow("登録フォルダパス", path_row)
+        if subfolder_count is not None:
+            count_label = QLabel(str(subfolder_count))
+            form.addRow("配下フォルダ数", count_label)
 
         layout.addLayout(form)
 
@@ -844,6 +856,23 @@ class BatchPreviewDialog(QDialog):
         for i in range(self.tree.topLevelItemCount()):
             walk(self.tree.topLevelItem(i), True)
         return selected
+
+    def unchecked_items(self) -> List[Dict[str, Any]]:
+        skipped: List[Dict[str, Any]] = []
+
+        def walk(item: QTreeWidgetItem, ancestor_checked: bool):
+            current_checked = ancestor_checked and item.checkState(0) == Qt.Checked
+            entry = item.data(0, Qt.UserRole)
+            if entry and isinstance(entry, dict) and not current_checked:
+                path = entry.get("path")
+                if path:
+                    skipped.append({"path": path})
+            for i in range(item.childCount()):
+                walk(item.child(i), current_checked)
+
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i), True)
+        return skipped
 
 
 class ArchiveDialog(QDialog):
@@ -1592,6 +1621,8 @@ class MainWindow(QMainWindow):
         self.current_user = user_name()
         self._category_tree_refreshing = False
         self._category_tree_refresh_pending = False
+        self.new_folder_highlights: set[str] = set()
+        self.new_category_highlights: set[str] = set()
 
         self.startup_rescan()
         self.refresh_folder_table()
@@ -1777,6 +1808,7 @@ class MainWindow(QMainWindow):
         key = self.category_path_key(path)
         if folder_path:
             paths[key] = folder_path
+            self.record_folder_subfolder_count(folder_path)
         else:
             paths.pop(key, None)
         self.settings["category_folder_paths"] = paths
@@ -1921,6 +1953,139 @@ class MainWindow(QMainWindow):
     def folder_key(self, folder_path: str) -> str:
         return os.path.normcase(os.path.abspath(folder_path))
 
+    def count_immediate_subfolders(self, folder_path: str, ignored_paths: Optional[set[str]] = None) -> int:
+        if not os.path.isdir(folder_path):
+            return 0
+        try:
+            count = 0
+            for name in os.listdir(folder_path):
+                if name.lower() in {"_history", LEGACY_META_DIR.lower()}:
+                    continue
+                full = os.path.join(folder_path, name)
+                if os.path.isdir(full):
+                    if ignored_paths and self.folder_key(full) in ignored_paths:
+                        continue
+                    count += 1
+            return count
+        except Exception:
+            return 0
+
+    def folder_subfolder_counts(self) -> Dict[str, int]:
+        data = self.settings.get("folder_subfolder_counts", {})
+        if not isinstance(data, dict):
+            data = {}
+        return {
+            self.folder_key(str(key)): int(value)
+            for key, value in data.items()
+            if isinstance(key, str)
+        }
+
+    def save_folder_subfolder_counts(self, counts: Dict[str, int]) -> None:
+        self.settings["folder_subfolder_counts"] = counts
+        save_settings(self.settings)
+
+    def folder_subfolder_count_for_path(self, folder_path: str) -> Optional[int]:
+        if not folder_path:
+            return None
+        counts = self.folder_subfolder_counts()
+        return counts.get(self.folder_key(folder_path))
+
+    def set_folder_subfolder_count(self, folder_path: str, count: int) -> None:
+        if not folder_path:
+            return
+        counts = self.folder_subfolder_counts()
+        counts[self.folder_key(folder_path)] = int(count)
+        self.save_folder_subfolder_counts(counts)
+
+    def record_folder_subfolder_count(self, folder_path: str) -> None:
+        if not folder_path:
+            return
+        counts = self.folder_subfolder_counts()
+        counts[self.folder_key(folder_path)] = self.count_immediate_subfolders(folder_path)
+        self.save_folder_subfolder_counts(counts)
+
+    def ignored_scan_paths(self) -> set[str]:
+        data = self.settings.get("ignored_scan_paths", [])
+        ignored: set[str] = set()
+        if isinstance(data, list):
+            for entry in data:
+                if isinstance(entry, str) and entry:
+                    ignored.add(self.folder_key(entry))
+        return ignored
+
+    def save_ignored_scan_paths(self, ignored: set[str]) -> None:
+        self.settings["ignored_scan_paths"] = sorted(ignored)
+        save_settings(self.settings)
+
+    def add_ignored_scan_paths(self, paths: List[str]) -> None:
+        if not paths:
+            return
+        ignored = self.ignored_scan_paths()
+        for path in paths:
+            if path:
+                ignored.add(self.folder_key(path))
+        self.save_ignored_scan_paths(ignored)
+
+    def remove_ignored_scan_paths(self, paths: List[str]) -> None:
+        if not paths:
+            return
+        ignored = self.ignored_scan_paths()
+        for path in paths:
+            if path:
+                ignored.discard(self.folder_key(path))
+        self.save_ignored_scan_paths(ignored)
+
+    def preview_subfolder_counts(self, root_path: str, items: List[Dict[str, Any]]) -> Dict[str, int]:
+        child_map: Dict[str, set[str]] = {}
+        for entry in items:
+            parts = entry.get("rel_parts", [])
+            if not isinstance(parts, list) or not parts:
+                continue
+            parent = root_path
+            child_map.setdefault(parent, set()).add(parts[0])
+            for idx in range(1, len(parts)):
+                parent = os.path.join(root_path, *parts[:idx])
+                child_map.setdefault(parent, set()).add(parts[idx])
+        return {path: len(children) for path, children in child_map.items()}
+
+    def detect_new_subfolders(self) -> set[str]:
+        counts = self.folder_subfolder_counts()
+        ignored_paths = self.ignored_scan_paths()
+        highlights: set[str] = set()
+        updated_counts = False
+        targets: set[str] = {
+            item["path"]
+            for item in self.registry
+            if isinstance(item.get("path"), str)
+        }
+        for folder_path in self.category_folder_paths().values():
+            if isinstance(folder_path, str) and folder_path:
+                targets.add(folder_path)
+        for root_path in targets:
+            if not root_path or not os.path.isdir(root_path):
+                continue
+            root_key = self.folder_key(root_path)
+            if root_key in ignored_paths:
+                continue
+            current_count = self.count_immediate_subfolders(root_path, ignored_paths)
+            if root_key not in counts:
+                counts[root_key] = current_count
+                updated_counts = True
+                continue
+            previous_count = counts.get(root_key, current_count)
+            if current_count > previous_count:
+                highlights.add(root_key)
+        if updated_counts:
+            self.save_folder_subfolder_counts(counts)
+        return highlights
+
+    def update_new_folder_highlights(self) -> None:
+        self.new_folder_highlights = self.detect_new_subfolders()
+        self.new_category_highlights = set()
+        for path, folder_path in self.category_folder_paths().items():
+            if self.folder_key(folder_path) in self.new_folder_highlights:
+                self.new_category_highlights.add(path)
+
     def doc_is_checked(self, folder_path: str, doc_key: str, doc_info: Optional[Dict[str, Any]] = None) -> bool:
         folder_key = self.folder_key(folder_path)
         folder_checks = self.user_checks.get(folder_key, {})
@@ -1987,6 +2152,18 @@ class MainWindow(QMainWindow):
         else:
             item.setForeground(QBrush())
 
+    def set_item_new_folder_style(self, item: QTableWidgetItem, has_new: bool) -> None:
+        if has_new:
+            item.setBackground(QBrush(self.new_folder_bg_color()))
+        else:
+            item.setBackground(QBrush())
+
+    def new_folder_bg_color(self) -> QColor:
+        base_color = self.palette().color(QPalette.Base)
+        if base_color.lightness() < 128:
+            return NEW_FOLDER_BG_COLOR_DARK
+        return NEW_FOLDER_BG_COLOR_LIGHT
+
     def registry_index_by_path(self, path: str) -> int:
         for idx, item in enumerate(self.registry):
             if os.path.normcase(item["path"]) == os.path.normcase(path):
@@ -2000,6 +2177,7 @@ class MainWindow(QMainWindow):
             return
         item = self.registry[idx]
         category_options = self.category_options()
+        subfolder_count = self.folder_subfolder_count_for_path(item.get("path", "")) or 0
 
         dlg = RegisterDialog(
             self,
@@ -2008,6 +2186,7 @@ class MainWindow(QMainWindow):
             initial_categories=self.category_path_for_item(item),
             category_options=category_options,
             ok_label="更新",
+            subfolder_count=subfolder_count,
         )
         if dlg.exec() != QDialog.Accepted:
             return
@@ -2051,6 +2230,7 @@ class MainWindow(QMainWindow):
         item["categories"] = categories
         self.registry[idx] = item
         save_registry(self.registry)
+        self.record_folder_subfolder_count(new_path)
         self.refresh_folder_table()
         self.refresh_category_tree()
         if self.current_folder and os.path.normcase(self.current_folder["path"]) == os.path.normcase(old_path):
@@ -2064,7 +2244,13 @@ class MainWindow(QMainWindow):
             return
         initial_name = path[-1]
         initial_folder_path = self.category_folder_path_for_path(path)
-        dlg = CategoryEditDialog(self, initial_name=initial_name, initial_path=initial_folder_path)
+        subfolder_count = self.folder_subfolder_count_for_path(initial_folder_path) or 0
+        dlg = CategoryEditDialog(
+            self,
+            initial_name=initial_name,
+            initial_path=initial_folder_path,
+            subfolder_count=subfolder_count,
+        )
         if dlg.exec() != QDialog.Accepted:
             return
         new_name, folder_path = dlg.get_values()
@@ -2115,6 +2301,7 @@ class MainWindow(QMainWindow):
             return
         self.registry.pop(idx)
         save_registry(self.registry)
+        self.add_ignored_scan_paths([path])
         if self.current_folder and os.path.normcase(self.current_folder["path"]) == os.path.normcase(path):
             self.current_folder = None
             self.current_meta = None
@@ -2138,6 +2325,7 @@ class MainWindow(QMainWindow):
             return
         target_paths = {item["path"] for item in targets}
         self.registry = [item for item in self.registry if item["path"] not in target_paths]
+        self.add_ignored_scan_paths(list(target_paths))
         self.remove_user_checks_for_paths(target_paths)
         self.remove_archived_under_path(path)
         order = self.category_order()
@@ -2349,6 +2537,7 @@ class MainWindow(QMainWindow):
             path = item["path"]
             last_date = ""
             has_unchecked = False
+            has_new_subfolder = False
             if item_type == "folder":
                 categories = item.get("categories") or []
                 highlight_enabled = (
@@ -2356,6 +2545,7 @@ class MainWindow(QMainWindow):
                     and self.is_folder_tree_checked(path)
                 )
                 has_unchecked = highlight_enabled and self.folder_has_unchecked(path)
+                has_new_subfolder = self.folder_key(path) in self.new_folder_highlights
 
                 if os.path.isdir(path):
                     try:
@@ -2383,6 +2573,8 @@ class MainWindow(QMainWindow):
                 it_name = QTableWidgetItem(f"{icon_prefix}{name}")
                 if category_folder_path:
                     it_name.setToolTip(category_folder_path)
+                    if self.category_path_key(path) in self.new_category_highlights:
+                        has_new_subfolder = True
                 it_name.setData(Qt.UserRole, {"type": "category", "path": path})
             else:
                 icon_prefix = "📁 "
@@ -2390,9 +2582,12 @@ class MainWindow(QMainWindow):
                 it_name.setToolTip(path)
                 it_name.setData(Qt.UserRole, path)
             self.set_item_unchecked_style(it_name, has_unchecked)
+            self.set_item_new_folder_style(it_name, has_new_subfolder)
 
             self.folders_table.setItem(r, 0, it_name)
-            self.folders_table.setItem(r, 1, QTableWidgetItem(last_date))
+            it_date = QTableWidgetItem(last_date)
+            self.set_item_new_folder_style(it_date, has_new_subfolder)
+            self.folders_table.setItem(r, 1, it_date)
 
         self.folders_table.repaint()
         self.folders_table.blockSignals(False)
@@ -2437,6 +2632,8 @@ class MainWindow(QMainWindow):
                 child_item.setData(0, Qt.UserRole, {"type": "category", "path": child_path})
                 if folder_path:
                     child_item.setToolTip(0, folder_path)
+                    if self.category_path_key(child_path) in self.new_category_highlights:
+                        child_item.setBackground(0, QBrush(self.new_folder_bg_color()))
                 child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable)
                 child_checked = self.is_category_checked(child_path)
                 child_item.setCheckState(0, Qt.Checked if child_checked else Qt.Unchecked)
@@ -2464,6 +2661,8 @@ class MainWindow(QMainWindow):
                     "path": folder["path"],
                     "category_path": path,
                 })
+                if self.folder_key(folder["path"]) in self.new_folder_highlights:
+                    folder_item.setBackground(0, QBrush(self.new_folder_bg_color()))
                 folder_highlight_enabled = highlight_enabled and folder_checked
                 if folder_highlight_enabled:
                     folder_unchecked = self.folder_has_unchecked(folder["path"])
@@ -3237,6 +3436,8 @@ class MainWindow(QMainWindow):
             "categories": categories,
         })
         save_registry(self.registry)
+        self.record_folder_subfolder_count(path)
+        self.remove_ignored_scan_paths([path])
         self.mark_all_docs_checked(path)
         self.refresh_folder_table()
         self.refresh_category_tree()
@@ -3276,14 +3477,31 @@ class MainWindow(QMainWindow):
             return False
 
         selected_items = preview_dialog.selected_items()
+        skipped_items = preview_dialog.unchecked_items()
+        skipped_paths = [
+            item["path"] for item in skipped_items
+            if isinstance(item.get("path"), str)
+        ]
+        self.add_ignored_scan_paths(skipped_paths)
         if not selected_items:
             self.warn("取り込む項目がありません。")
             return False
         self.registry.extend(selected_items)
         save_registry(self.registry)
+        selected_paths = [
+            item["path"] for item in selected_items
+            if isinstance(item.get("path"), str)
+        ]
+        self.remove_ignored_scan_paths(selected_paths)
+        preview_counts = self.preview_subfolder_counts(root_path, items)
         for item in selected_items:
             folder_path = item.get("path")
             if isinstance(folder_path, str):
+                count = preview_counts.get(folder_path)
+                if count is not None:
+                    self.set_folder_subfolder_count(folder_path, count)
+                else:
+                    self.record_folder_subfolder_count(folder_path)
                 self.mark_all_docs_checked(folder_path)
         self.refresh_folder_table()
         self.refresh_category_tree()
@@ -3409,6 +3627,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def on_rescan(self):
+        self.update_new_folder_highlights()
         self.refresh_folder_table()
         self.refresh_files_table()
         self.refresh_category_tree()
