@@ -590,6 +590,7 @@ class RegisterDialog(QDialog):
         initial_categories: Optional[List[str]] = None,
         category_options: Optional[List[List[str]]] = None,
         ok_label: str = "登録",
+        subfolder_count: Optional[int] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("登録")
@@ -625,6 +626,9 @@ class RegisterDialog(QDialog):
         button_row.addWidget(self.add_category_button)
         category_box.addLayout(button_row)
         form.addRow("カテゴリ階層", category_box)
+        if subfolder_count is not None:
+            count_label = QLabel(str(subfolder_count))
+            form.addRow("配下フォルダ数", count_label)
 
         if initial_path:
             self.path_edit.setText(initial_path)
@@ -686,6 +690,7 @@ class CategoryEditDialog(QDialog):
         parent: QWidget | None = None,
         initial_name: str = "",
         initial_path: str = "",
+        subfolder_count: Optional[int] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("カテゴリ編集")
@@ -708,6 +713,9 @@ class CategoryEditDialog(QDialog):
 
         form.addRow("カテゴリ名", self.name_edit)
         form.addRow("登録フォルダパス", path_row)
+        if subfolder_count is not None:
+            count_label = QLabel(str(subfolder_count))
+            form.addRow("配下フォルダ数", count_label)
 
         layout.addLayout(form)
 
@@ -1976,6 +1984,19 @@ class MainWindow(QMainWindow):
         self.settings["folder_subfolder_counts"] = counts
         save_settings(self.settings)
 
+    def folder_subfolder_count_for_path(self, folder_path: str) -> Optional[int]:
+        if not folder_path:
+            return None
+        counts = self.folder_subfolder_counts()
+        return counts.get(self.folder_key(folder_path))
+
+    def set_folder_subfolder_count(self, folder_path: str, count: int) -> None:
+        if not folder_path:
+            return
+        counts = self.folder_subfolder_counts()
+        counts[self.folder_key(folder_path)] = int(count)
+        self.save_folder_subfolder_counts(counts)
+
     def record_folder_subfolder_count(self, folder_path: str) -> None:
         if not folder_path:
             return
@@ -2014,10 +2035,24 @@ class MainWindow(QMainWindow):
                 ignored.discard(self.folder_key(path))
         self.save_ignored_scan_paths(ignored)
 
+    def preview_subfolder_counts(self, root_path: str, items: List[Dict[str, Any]]) -> Dict[str, int]:
+        child_map: Dict[str, set[str]] = {}
+        for entry in items:
+            parts = entry.get("rel_parts", [])
+            if not isinstance(parts, list) or not parts:
+                continue
+            parent = root_path
+            child_map.setdefault(parent, set()).add(parts[0])
+            for idx in range(1, len(parts)):
+                parent = os.path.join(root_path, *parts[:idx])
+                child_map.setdefault(parent, set()).add(parts[idx])
+        return {path: len(children) for path, children in child_map.items()}
+
     def detect_new_subfolders(self) -> set[str]:
         counts = self.folder_subfolder_counts()
         ignored_paths = self.ignored_scan_paths()
         highlights: set[str] = set()
+        updated_counts = False
         targets: set[str] = {
             item["path"]
             for item in self.registry
@@ -2033,9 +2068,15 @@ class MainWindow(QMainWindow):
             if root_key in ignored_paths:
                 continue
             current_count = self.count_immediate_subfolders(root_path, ignored_paths)
+            if root_key not in counts:
+                counts[root_key] = current_count
+                updated_counts = True
+                continue
             previous_count = counts.get(root_key, current_count)
             if current_count > previous_count:
                 highlights.add(root_key)
+        if updated_counts:
+            self.save_folder_subfolder_counts(counts)
         return highlights
 
     def update_new_folder_highlights(self) -> None:
@@ -2136,6 +2177,7 @@ class MainWindow(QMainWindow):
             return
         item = self.registry[idx]
         category_options = self.category_options()
+        subfolder_count = self.folder_subfolder_count_for_path(item.get("path", "")) or 0
 
         dlg = RegisterDialog(
             self,
@@ -2144,6 +2186,7 @@ class MainWindow(QMainWindow):
             initial_categories=self.category_path_for_item(item),
             category_options=category_options,
             ok_label="更新",
+            subfolder_count=subfolder_count,
         )
         if dlg.exec() != QDialog.Accepted:
             return
@@ -2201,7 +2244,13 @@ class MainWindow(QMainWindow):
             return
         initial_name = path[-1]
         initial_folder_path = self.category_folder_path_for_path(path)
-        dlg = CategoryEditDialog(self, initial_name=initial_name, initial_path=initial_folder_path)
+        subfolder_count = self.folder_subfolder_count_for_path(initial_folder_path) or 0
+        dlg = CategoryEditDialog(
+            self,
+            initial_name=initial_name,
+            initial_path=initial_folder_path,
+            subfolder_count=subfolder_count,
+        )
         if dlg.exec() != QDialog.Accepted:
             return
         new_name, folder_path = dlg.get_values()
@@ -3444,10 +3493,15 @@ class MainWindow(QMainWindow):
             if isinstance(item.get("path"), str)
         ]
         self.remove_ignored_scan_paths(selected_paths)
+        preview_counts = self.preview_subfolder_counts(root_path, items)
         for item in selected_items:
             folder_path = item.get("path")
             if isinstance(folder_path, str):
-                self.record_folder_subfolder_count(folder_path)
+                count = preview_counts.get(folder_path)
+                if count is not None:
+                    self.set_folder_subfolder_count(folder_path, count)
+                else:
+                    self.record_folder_subfolder_count(folder_path)
                 self.mark_all_docs_checked(folder_path)
         self.refresh_folder_table()
         self.refresh_category_tree()
