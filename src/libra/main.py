@@ -1945,6 +1945,26 @@ class MainWindow(QMainWindow):
     def mark_doc_checked(self, folder_path: str, doc_key: str) -> None:
         self.set_doc_checked(folder_path, doc_key, True)
 
+    def mark_all_docs_checked(self, folder_path: str) -> None:
+        if not os.path.isdir(folder_path):
+            return
+        meta, _rows = scan_folder(folder_path, self.ignore_types)
+        docs = meta.get("documents", {})
+        if not isinstance(docs, dict) or not docs:
+            return
+        folder_key = self.folder_key(folder_path)
+        folder_checks = self.user_checks.get(folder_key, {})
+        if not isinstance(folder_checks, dict):
+            folder_checks = {}
+        updated = False
+        for doc_key in docs.keys():
+            if folder_checks.get(doc_key) is not True:
+                folder_checks[doc_key] = True
+                updated = True
+        if updated:
+            self.user_checks[folder_key] = folder_checks
+            save_user_checks(self.user_checks)
+
     def folder_has_unchecked(self, folder_path: str) -> bool:
         if not os.path.isdir(folder_path):
             return False
@@ -2357,13 +2377,18 @@ class MainWindow(QMainWindow):
             r = self.folders_table.rowCount()
             self.folders_table.insertRow(r)
 
-            icon_prefix = "🔖 " if item_type == "category" else "📁 "
-            it_name = QTableWidgetItem(f"{icon_prefix}{name}")
-            if item_type == "folder":
+            if item_type == "category":
+                category_folder_path = self.category_folder_path_for_path(path)
+                icon_prefix = "📁 " if category_folder_path else "🔖 "
+                it_name = QTableWidgetItem(f"{icon_prefix}{name}")
+                if category_folder_path:
+                    it_name.setToolTip(category_folder_path)
+                it_name.setData(Qt.UserRole, {"type": "category", "path": path})
+            else:
+                icon_prefix = "📁 "
+                it_name = QTableWidgetItem(f"{icon_prefix}{name}")
                 it_name.setToolTip(path)
                 it_name.setData(Qt.UserRole, path)
-            else:
-                it_name.setData(Qt.UserRole, {"type": "category", "path": path})
             self.set_item_unchecked_style(it_name, has_unchecked)
 
             self.folders_table.setItem(r, 0, it_name)
@@ -3212,6 +3237,7 @@ class MainWindow(QMainWindow):
             "categories": categories,
         })
         save_registry(self.registry)
+        self.mark_all_docs_checked(path)
         self.refresh_folder_table()
         self.refresh_category_tree()
         self.info("登録しました。")
@@ -3255,6 +3281,10 @@ class MainWindow(QMainWindow):
             return False
         self.registry.extend(selected_items)
         save_registry(self.registry)
+        for item in selected_items:
+            folder_path = item.get("path")
+            if isinstance(folder_path, str):
+                self.mark_all_docs_checked(folder_path)
         self.refresh_folder_table()
         self.refresh_category_tree()
         self.info(f"{len(selected_items)} 件を一括登録しました。")
