@@ -162,6 +162,8 @@ def load_settings() -> Dict[str, Any]:
             "shortcut": True,
             "bak": True,
             "log": True,
+            "dwl": True,
+            "dwl2": True,
         },
         "version_rules": DEFAULT_VERSION_RULES,
     }
@@ -368,6 +370,8 @@ def normalize_ignore_types(ignore_types: Optional[Dict[str, Any]]) -> Dict[str, 
         "shortcut": True,
         "bak": True,
         "log": True,
+        "dwl": True,
+        "dwl2": True,
     }
     if not isinstance(ignore_types, dict):
         return defaults
@@ -396,6 +400,10 @@ def should_ignore_file(filename: str, ignore_types: Dict[str, bool]) -> bool:
     if ignore_types.get("bak") and ext == ".bak":
         return True
     if ignore_types.get("log") and ext == ".log":
+        return True
+    if ignore_types.get("dwl") and ext == ".dwl":
+        return True
+    if ignore_types.get("dwl2") and ext == ".dwl2":
         return True
     return False
 
@@ -1264,6 +1272,12 @@ class OptionsDialog(QDialog):
         self.ignore_log = QCheckBox(".log")
         self.ignore_log.setChecked(ignore_flags.get("log", False))
         ignore_layout.addWidget(self.ignore_log)
+        self.ignore_dwl = QCheckBox(".dwl")
+        self.ignore_dwl.setChecked(ignore_flags.get("dwl", False))
+        ignore_layout.addWidget(self.ignore_dwl)
+        self.ignore_dwl2 = QCheckBox(".dwl2")
+        self.ignore_dwl2.setChecked(ignore_flags.get("dwl2", False))
+        ignore_layout.addWidget(self.ignore_dwl2)
         layout.addWidget(ignore_group)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1281,6 +1295,8 @@ class OptionsDialog(QDialog):
             "shortcut": self.ignore_shortcut.isChecked(),
             "bak": self.ignore_bak.isChecked(),
             "log": self.ignore_log.isChecked(),
+            "dwl": self.ignore_dwl.isChecked(),
+            "dwl2": self.ignore_dwl2.isChecked(),
         }
 
     def get_version_rules(self) -> Dict[str, str]:
@@ -1413,9 +1429,13 @@ class MainWindow(QMainWindow):
         btn_replace = QPushButton("差し替え")
         btn_replace.clicked.connect(self.on_replace)
 
+        btn_view = QPushButton("観覧")
+        btn_view.clicked.connect(self.on_view)
+
         files_button_row = QHBoxLayout()
         files_button_row.addWidget(btn_update)
         files_button_row.addWidget(btn_replace)
+        files_button_row.addWidget(btn_view)
         files_button_row.addStretch(1)
 
         self.files_table = QTableWidget(0, 6)
@@ -2627,23 +2647,29 @@ class MainWindow(QMainWindow):
         elif action == act_history_clear:
             self.on_history_clear()
 
+    def open_current_file(self, folder_path: str, filename: str, doc_key: str) -> None:
+        file_path = os.path.join(folder_path, filename)
+        if not os.path.exists(file_path):
+            self.warn("現行ファイルが見つかりません。")
+            return
+        try:
+            os.startfile(file_path)  # type: ignore[attr-defined]
+        except Exception as e:
+            self.warn(f"ファイルを開けませんでした: {e}")
+            return
+        self.mark_doc_checked(folder_path, doc_key)
+        self.refresh_files_table()
+        self.refresh_folder_table()
+        self.refresh_category_tree()
+
     def on_file_double_clicked(self, item: QTableWidgetItem):
         row = item.row()
         if row < 0 or row >= len(self.current_file_rows):
             return
         if not self.current_folder:
             return
-        file_path = os.path.join(self.current_folder["path"], self.current_file_rows[row].filename)
-        if os.path.exists(file_path):
-            try:
-                os.startfile(file_path)  # type: ignore[attr-defined]
-            except Exception as e:
-                self.warn(f"ファイルを開けませんでした: {e}")
-                return
-            self.mark_doc_checked(self.current_folder["path"], self.current_file_rows[row].doc_key)
-            self.refresh_files_table()
-            self.refresh_folder_table()
-            self.refresh_category_tree()
+        row_info = self.current_file_rows[row]
+        self.open_current_file(self.current_folder["path"], row_info.filename, row_info.doc_key)
 
     def on_file_check_changed(self, item: QTableWidgetItem):
         if item.column() != 0:
@@ -3024,6 +3050,17 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self.warn(f"更新に失敗しました: {e}")
+
+    def on_view(self):
+        sel = self._get_selected_doc()
+        if not sel:
+            return
+        folder_path, doc_key, info = sel
+        cur_fn = info.get("current_file", "")
+        if not cur_fn:
+            self.warn("現行ファイルが不明です。")
+            return
+        self.open_current_file(folder_path, cur_fn, doc_key)
 
     def on_replace(self):
         sel = self._get_selected_doc()
