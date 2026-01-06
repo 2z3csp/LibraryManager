@@ -1112,6 +1112,41 @@ class HistorySelectDialog(QDialog):
         return None
 
 
+class HistoryDetailDialog(QDialog):
+    def __init__(self, entry: Dict[str, Any], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("履歴詳細")
+        self.setMinimumWidth(560)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        kind_text = entry.get("kind", "") or ""
+        rev_text = display_rev(entry.get("rev", "") or "")
+        updated_text = (entry.get("updated_at", "") or "").replace("T", " ")
+        updated_by = entry.get("updated_by", "") or ""
+        file_name = entry.get("file", "") or ""
+
+        form.addRow("区分", QLabel(kind_text))
+        form.addRow("rev", QLabel(rev_text))
+        form.addRow("更新日時", QLabel(updated_text))
+        form.addRow("更新者", QLabel(updated_by))
+        form.addRow("ファイル", QLabel(file_name))
+        layout.addLayout(form)
+
+        memo_label = QLabel("メモ")
+        memo_view = QPlainTextEdit()
+        memo_view.setReadOnly(True)
+        memo_view.setPlainText(entry.get("memo", "") or "")
+        layout.addWidget(memo_label)
+        layout.addWidget(memo_view)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.button(QDialogButtonBox.Ok).setText("閉じる")
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+
 class MemoDialog(QDialog):
     def __init__(self, title: str, subtitle: str, default_memo: str = "", parent: QWidget | None = None):
         super().__init__(parent)
@@ -1424,7 +1459,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.folders_table)
         splitter.addWidget(left_box)
 
-        # Middle: files table
+        # Middle: files table + history
         mid_box = QWidget()
         mid_layout = QVBoxLayout(mid_box)
         mid_layout.setContentsMargins(0, 0, 0, 0)
@@ -1467,38 +1502,33 @@ class MainWindow(QMainWindow):
         self.files_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.files_table.customContextMenuRequested.connect(self.on_files_table_context_menu)
 
-        mid_layout.addWidget(files_title)
-        mid_layout.addLayout(files_button_row)
-        mid_layout.addWidget(self.files_table)
-        splitter.addWidget(mid_box)
-
-        # Right: memo + history
-        right_box = QWidget()
-        right_layout = QVBoxLayout(right_box)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-
-        memo_group = QGroupBox("最新メモ")
-        memo_layout = QVBoxLayout(memo_group)
-        self.memo_view = QPlainTextEdit()
-        self.memo_view.setReadOnly(True)
-        self.memo_view.setPlaceholderText("ここに最新メモを表示")
-        memo_layout.addWidget(self.memo_view)
-        right_layout.addWidget(memo_group, 1)
-
-        hist_group = QGroupBox("履歴（更新日・人・メモ）")
+        hist_group = QWidget()
         hist_layout = QVBoxLayout(hist_group)
-        self.hist_table = QTableWidget(0, 3)
-        self.hist_table.setHorizontalHeaderLabels(["更新日時", "更新者", "メモ"])
+        hist_layout.setContentsMargins(0, 0, 0, 0)
+        hist_title = QLabel("履歴")
+        self.hist_table = QTableWidget(0, 5)
+        self.hist_table.setHorizontalHeaderLabels(["区分", "rev", "更新日時", "更新者", "メモ"])
         self.hist_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.hist_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.hist_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.hist_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.hist_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.hist_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.hist_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.hist_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.hist_table.itemDoubleClicked.connect(self.on_history_item_double_clicked)
+        hist_layout.addWidget(hist_title)
         hist_layout.addWidget(self.hist_table)
-        right_layout.addWidget(hist_group, 1)
 
-        splitter.addWidget(right_box)
-        splitter.setSizes([260, 440, 520, 360])
+        mid_layout.addWidget(files_title)
+        mid_layout.addLayout(files_button_row)
+        mid_layout.addWidget(self.files_table, 2)
+        mid_layout.addWidget(hist_group, 1)
+        splitter.addWidget(mid_box)
+
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 2)
+        splitter.setSizes([300, 300, 600])
 
         # State
         self.current_folder: Optional[Dict[str, str]] = None
@@ -2350,7 +2380,6 @@ class MainWindow(QMainWindow):
         selected_index = self.selected_file_index()
         if 0 <= selected_index < len(self.current_file_rows):
             selected_doc_key = self.current_file_rows[selected_index].doc_key
-        self.memo_view.setPlainText("")
         self.hist_table.setRowCount(0)
 
         if not self.current_folder:
@@ -2401,7 +2430,6 @@ class MainWindow(QMainWindow):
         self.files_table.setUpdatesEnabled(True)
 
     def refresh_right_pane_for_doc(self, doc_key: str):
-        self.memo_view.setPlainText("")
         self.hist_table.setRowCount(0)
 
         if not self.current_meta:
@@ -2411,24 +2439,47 @@ class MainWindow(QMainWindow):
         if not isinstance(info, dict):
             return
 
-        self.memo_view.setPlainText(info.get("last_memo", "") or "")
-
         history = info.get("history", [])
         if not isinstance(history, list):
-            return
+            history = []
+
+        latest_entry = {
+            "kind": "最新",
+            "rev": info.get("current_rev", "") or "",
+            "updated_at": info.get("updated_at", "") or "",
+            "updated_by": info.get("updated_by", "") or "",
+            "memo": info.get("last_memo", "") or "",
+            "file": info.get("current_file", "") or "",
+        }
+        self.add_history_row(latest_entry)
 
         # show newest first
         items = list(history)
         items.reverse()
 
         for h in items:
-            r = self.hist_table.rowCount()
-            self.hist_table.insertRow(r)
-            it_updated = QTableWidgetItem((h.get("updated_at", "") or "").replace("T", " "))
-            it_updated.setData(Qt.UserRole, h)
-            self.hist_table.setItem(r, 0, it_updated)
-            self.hist_table.setItem(r, 1, QTableWidgetItem(h.get("updated_by", "") or ""))
-            self.hist_table.setItem(r, 2, QTableWidgetItem(h.get("memo", "") or ""))
+            entry = {
+                "kind": "履歴",
+                "rev": h.get("rev", "") or "",
+                "updated_at": h.get("updated_at", "") or "",
+                "updated_by": h.get("updated_by", "") or "",
+                "memo": h.get("memo", "") or "",
+                "file": h.get("file", "") or "",
+            }
+            self.add_history_row(entry)
+
+    def add_history_row(self, entry: Dict[str, Any]) -> None:
+        r = self.hist_table.rowCount()
+        self.hist_table.insertRow(r)
+        kind_item = QTableWidgetItem(entry.get("kind", "") or "")
+        kind_item.setData(Qt.UserRole, entry)
+        rev_text = display_rev(entry.get("rev", "") or "")
+        updated_text = (entry.get("updated_at", "") or "").replace("T", " ")
+        self.hist_table.setItem(r, 0, kind_item)
+        self.hist_table.setItem(r, 1, QTableWidgetItem(rev_text))
+        self.hist_table.setItem(r, 2, QTableWidgetItem(updated_text))
+        self.hist_table.setItem(r, 3, QTableWidgetItem(entry.get("updated_by", "") or ""))
+        self.hist_table.setItem(r, 4, QTableWidgetItem(entry.get("memo", "") or ""))
 
     # ---------- events ----------
     def on_category_tree_order_changed(self):
@@ -2937,6 +2988,17 @@ class MainWindow(QMainWindow):
             return
         row = self.current_file_rows[idx]
         self.refresh_right_pane_for_doc(row.doc_key)
+
+    def on_history_item_double_clicked(self, item: QTableWidgetItem):
+        row = item.row()
+        data_item = self.hist_table.item(row, 0)
+        if not data_item:
+            return
+        entry = data_item.data(Qt.UserRole)
+        if not isinstance(entry, dict):
+            return
+        dlg = HistoryDetailDialog(entry, self)
+        dlg.exec()
 
     def on_rescan(self):
         self.refresh_folder_table()
