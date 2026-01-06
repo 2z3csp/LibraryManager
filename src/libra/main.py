@@ -1448,12 +1448,17 @@ class MainWindow(QMainWindow):
 
         self.files_table = QTableWidget(0, 6)
         self.files_table.setHorizontalHeaderLabels(["", "ファイル（最新）", "rev", "更新日", "更新者", "DocKey"])
+        files_header_item = QTableWidgetItem("")
+        files_header_item.setFlags(files_header_item.flags() | Qt.ItemIsUserCheckable)
+        files_header_item.setCheckState(Qt.Unchecked)
+        self.files_table.setHorizontalHeaderItem(0, files_header_item)
         self.files_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.files_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.files_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.files_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.files_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.files_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.files_table.horizontalHeader().sectionClicked.connect(self.on_files_header_clicked)
         self.files_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.files_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.files_table.itemSelectionChanged.connect(self.on_file_selected)
@@ -2349,6 +2354,7 @@ class MainWindow(QMainWindow):
         self.hist_table.setRowCount(0)
 
         if not self.current_folder:
+            self.update_files_header_check_state()
             self.files_table.blockSignals(False)
             self.files_table.setUpdatesEnabled(True)
             return
@@ -2356,6 +2362,7 @@ class MainWindow(QMainWindow):
         folder_path = self.current_folder["path"]
         if not os.path.isdir(folder_path):
             self.warn("登録フォルダが見つかりません。パスを確認してください。")
+            self.update_files_header_check_state()
             self.files_table.blockSignals(False)
             self.files_table.setUpdatesEnabled(True)
             return
@@ -2387,6 +2394,7 @@ class MainWindow(QMainWindow):
 
         # hide DocKey column by default (can be useful for debugging)
         self.files_table.setColumnHidden(5, True)
+        self.update_files_header_check_state()
         if selected_doc_key:
             self.select_doc_key(selected_doc_key)
         self.files_table.blockSignals(False)
@@ -2692,8 +2700,61 @@ class MainWindow(QMainWindow):
         name_item = self.files_table.item(item.row(), 1)
         if name_item:
             self.set_item_unchecked_style(name_item, not checked)
+        self.update_files_header_check_state()
         self.refresh_folder_table()
         self.refresh_category_tree()
+
+    def on_files_header_clicked(self, logical_index: int):
+        if logical_index != 0:
+            return
+        header_item = self.files_table.horizontalHeaderItem(0)
+        if not header_item:
+            return
+        if self.files_table.rowCount() == 0:
+            header_item.setCheckState(Qt.Unchecked)
+            return
+        next_state = Qt.Unchecked if header_item.checkState() == Qt.Checked else Qt.Checked
+        header_item.setCheckState(next_state)
+        if not self.current_folder:
+            return
+        folder_path = self.current_folder["path"]
+        self.files_table.blockSignals(True)
+        for row in range(self.files_table.rowCount()):
+            item = self.files_table.item(row, 0)
+            if not item:
+                continue
+            doc_key = item.data(Qt.UserRole)
+            if not doc_key:
+                continue
+            checked = next_state == Qt.Checked
+            item.setCheckState(next_state)
+            self.set_doc_checked(folder_path, doc_key, checked)
+            name_item = self.files_table.item(row, 1)
+            if name_item:
+                self.set_item_unchecked_style(name_item, not checked)
+        self.files_table.blockSignals(False)
+        self.refresh_folder_table()
+        self.refresh_category_tree()
+
+    def update_files_header_check_state(self):
+        header_item = self.files_table.horizontalHeaderItem(0)
+        if not header_item:
+            return
+        total_rows = self.files_table.rowCount()
+        if total_rows == 0:
+            header_item.setCheckState(Qt.Unchecked)
+            return
+        checked_rows = 0
+        for row in range(total_rows):
+            item = self.files_table.item(row, 0)
+            if item and item.checkState() == Qt.Checked:
+                checked_rows += 1
+        if checked_rows == 0:
+            header_item.setCheckState(Qt.Unchecked)
+        elif checked_rows == total_rows:
+            header_item.setCheckState(Qt.Checked)
+        else:
+            header_item.setCheckState(Qt.PartiallyChecked)
 
     def open_register_dialog(self, initial_categories: Optional[List[str]] = None):
         category_options = self.category_options()
