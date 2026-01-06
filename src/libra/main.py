@@ -1449,7 +1449,7 @@ class MainWindow(QMainWindow):
         self.folders_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.folders_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.folders_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.folders_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.folders_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.folders_table.itemSelectionChanged.connect(self.on_folder_selected)
         self.folders_table.itemDoubleClicked.connect(self.on_folder_double_clicked)
         self.folders_table.setContextMenuPolicy(Qt.CustomContextMenu)
