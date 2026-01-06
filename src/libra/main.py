@@ -164,6 +164,7 @@ def load_settings() -> Dict[str, Any]:
             "log": True,
             "dwl": True,
             "dwl2": True,
+            "ini": True,
         },
         "version_rules": DEFAULT_VERSION_RULES,
     }
@@ -372,6 +373,7 @@ def normalize_ignore_types(ignore_types: Optional[Dict[str, Any]]) -> Dict[str, 
         "log": True,
         "dwl": True,
         "dwl2": True,
+        "ini": True,
     }
     if not isinstance(ignore_types, dict):
         return defaults
@@ -404,6 +406,8 @@ def should_ignore_file(filename: str, ignore_types: Dict[str, bool]) -> bool:
     if ignore_types.get("dwl") and ext == ".dwl":
         return True
     if ignore_types.get("dwl2") and ext == ".dwl2":
+        return True
+    if ignore_types.get("ini") and ext == ".ini":
         return True
     return False
 
@@ -1278,6 +1282,9 @@ class OptionsDialog(QDialog):
         self.ignore_dwl2 = QCheckBox(".dwl2")
         self.ignore_dwl2.setChecked(ignore_flags.get("dwl2", False))
         ignore_layout.addWidget(self.ignore_dwl2)
+        self.ignore_ini = QCheckBox(".ini")
+        self.ignore_ini.setChecked(ignore_flags.get("ini", False))
+        ignore_layout.addWidget(self.ignore_ini)
         layout.addWidget(ignore_group)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1297,6 +1304,7 @@ class OptionsDialog(QDialog):
             "log": self.ignore_log.isChecked(),
             "dwl": self.ignore_dwl.isChecked(),
             "dwl2": self.ignore_dwl2.isChecked(),
+            "ini": self.ignore_ini.isChecked(),
         }
 
     def get_version_rules(self) -> Dict[str, str]:
