@@ -3782,16 +3782,6 @@ class MainWindow(QMainWindow):
         self.refresh_category_tree()
         self.refresh_files_table()
         self.info(f"キャッシュクリアが完了しました。settings: {settings_removed}件, user_checks: {user_checks_removed}件")
-        action = dlg.selected_action
-        path = dlg.selected_path()
-        if not path:
-            return
-        if action == "restore":
-            self.unarchive_category_path(path)
-            self.refresh_folder_table()
-            self.refresh_category_tree()
-        elif action == "delete":
-            self.delete_category_hierarchy(path)
 
     # ---------- core operations ----------
     def _get_selected_doc(self) -> Optional[Tuple[str, str, Dict[str, Any]]]:
