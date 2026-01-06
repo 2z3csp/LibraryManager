@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, List
 
 from PySide6.QtCore import Qt, QSize, QTimer, Signal
-from PySide6.QtGui import QAction, QBrush, QColor, QIcon
+from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -93,7 +93,8 @@ SETTINGS_PATH = os.path.join(appdata_dir(), "settings.json")
 USER_CHECKS_PATH = os.path.join(appdata_dir(), "user_checks.json")
 DEFAULT_MEMO_TIMEOUT_MIN = 30
 UNCHECKED_COLOR = QColor("#C0504D")
-NEW_FOLDER_BG_COLOR = QColor("#FFF2CC")
+NEW_FOLDER_BG_COLOR_LIGHT = QColor("#FFF2CC")
+NEW_FOLDER_BG_COLOR_DARK = QColor("#4C3B00")
 CATEGORY_PATH_SEP = "\u001f"
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ASSET_DIR = os.path.join(ROOT_DIR, "assets")
@@ -1984,23 +1985,17 @@ class MainWindow(QMainWindow):
                 continue
             root_key = self.folder_key(root_path)
             try:
-                for dirpath, dirnames, _filenames in os.walk(root_path):
-                    dirnames[:] = [
-                        d for d in dirnames
-                        if d.lower() not in {"_history", LEGACY_META_DIR.lower()}
-                    ]
-                    found = False
-                    for name in dirnames:
-                        full = os.path.join(dirpath, name)
-                        key = self.folder_key(full)
-                        if key in registered_paths or key in ignored_paths:
-                            continue
-                        found = True
-                        break
-                    if found:
-                        highlights.add(root_key)
-                        break
-                    dirnames[:] = []
+                for name in os.listdir(root_path):
+                    if name.lower() in {"_history", LEGACY_META_DIR.lower()}:
+                        continue
+                    full = os.path.join(root_path, name)
+                    if not os.path.isdir(full):
+                        continue
+                    key = self.folder_key(full)
+                    if key in registered_paths or key in ignored_paths:
+                        continue
+                    highlights.add(root_key)
+                    break
             except Exception:
                 continue
         return highlights
@@ -2076,9 +2071,15 @@ class MainWindow(QMainWindow):
 
     def set_item_new_folder_style(self, item: QTableWidgetItem, has_new: bool) -> None:
         if has_new:
-            item.setBackground(QBrush(NEW_FOLDER_BG_COLOR))
+            item.setBackground(QBrush(self.new_folder_bg_color()))
         else:
             item.setBackground(QBrush())
+
+    def new_folder_bg_color(self) -> QColor:
+        base_color = self.palette().color(QPalette.Base)
+        if base_color.lightness() < 128:
+            return NEW_FOLDER_BG_COLOR_DARK
+        return NEW_FOLDER_BG_COLOR_LIGHT
 
     def registry_index_by_path(self, path: str) -> int:
         for idx, item in enumerate(self.registry):
@@ -2565,7 +2566,7 @@ class MainWindow(QMainWindow):
                     "category_path": path,
                 })
                 if self.folder_key(folder["path"]) in self.new_folder_highlights:
-                    folder_item.setBackground(0, QBrush(NEW_FOLDER_BG_COLOR))
+                    folder_item.setBackground(0, QBrush(self.new_folder_bg_color()))
                 folder_highlight_enabled = highlight_enabled and folder_checked
                 if folder_highlight_enabled:
                     folder_unchecked = self.folder_has_unchecked(folder["path"])
