@@ -1502,8 +1502,10 @@ class MainWindow(QMainWindow):
         self.files_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.files_table.customContextMenuRequested.connect(self.on_files_table_context_menu)
 
-        hist_group = QGroupBox("履歴")
+        hist_group = QWidget()
         hist_layout = QVBoxLayout(hist_group)
+        hist_layout.setContentsMargins(0, 0, 0, 0)
+        hist_title = QLabel("履歴")
         self.hist_table = QTableWidget(0, 5)
         self.hist_table.setHorizontalHeaderLabels(["区分", "rev", "更新日時", "更新者", "メモ"])
         self.hist_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -1514,6 +1516,7 @@ class MainWindow(QMainWindow):
         self.hist_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.hist_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.hist_table.itemDoubleClicked.connect(self.on_history_item_double_clicked)
+        hist_layout.addWidget(hist_title)
         hist_layout.addWidget(self.hist_table)
 
         mid_layout.addWidget(files_title)
