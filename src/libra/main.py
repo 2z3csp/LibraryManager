@@ -158,6 +158,7 @@ def load_settings() -> Dict[str, Any]:
         "memo_timeout_min": DEFAULT_MEMO_TIMEOUT_MIN,
         "category_order": {"categories": {}, "folder": {}},
         "archived_categories": [],
+        "category_folder_paths": {},
         "ignore_types": {
             "shortcut": True,
             "bak": True,
@@ -673,6 +674,53 @@ class RegisterDialog(QDialog):
             self.path_edit.text().strip(),
             categories,
         )
+
+
+class CategoryEditDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        initial_name: str = "",
+        initial_path: str = "",
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("カテゴリ編集")
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setText(initial_name)
+
+        self.path_edit = QLineEdit()
+        self.path_edit.setText(initial_path)
+        self.path_btn = QPushButton("参照...")
+        self.path_btn.clicked.connect(self.pick_folder)
+
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.path_edit, 1)
+        path_row.addWidget(self.path_btn)
+
+        form.addRow("カテゴリ名", self.name_edit)
+        form.addRow("登録フォルダパス", path_row)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("更新")
+        buttons.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def pick_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "フォルダを選択")
+        if path:
+            self.path_edit.setText(path)
+
+    def get_values(self) -> Tuple[str, str]:
+        return self.name_edit.text().strip(), self.path_edit.text().strip()
 
 
 class BatchRegisterDialog(QDialog):
@@ -1713,6 +1761,85 @@ class MainWindow(QMainWindow):
         order.setdefault("tree", {})
         return order
 
+    def category_folder_paths(self) -> Dict[str, str]:
+        paths = self.settings.get("category_folder_paths")
+        if not isinstance(paths, dict):
+            paths = {}
+            self.settings["category_folder_paths"] = paths
+        return {str(k): str(v) for k, v in paths.items() if isinstance(v, str)}
+
+    def category_folder_path_for_path(self, path: List[str]) -> str:
+        key = self.category_path_key(path)
+        return self.category_folder_paths().get(key, "")
+
+    def set_category_folder_path(self, path: List[str], folder_path: str) -> None:
+        paths = self.category_folder_paths()
+        key = self.category_path_key(path)
+        if folder_path:
+            paths[key] = folder_path
+        else:
+            paths.pop(key, None)
+        self.settings["category_folder_paths"] = paths
+        save_settings(self.settings)
+
+    def replace_category_prefix(self, path: List[str], old_prefix: List[str], new_prefix: List[str]) -> List[str]:
+        if path[:len(old_prefix)] != old_prefix:
+            return path
+        return new_prefix + path[len(old_prefix):]
+
+    def rename_category_in_settings(self, old_path: List[str], new_path: List[str]) -> None:
+        old_key = self.category_path_key(old_path)
+        new_key = self.category_path_key(new_path)
+        old_name = old_path[-1] if old_path else ""
+        new_name = new_path[-1] if new_path else ""
+
+        def remap_key(key: str) -> str:
+            if key == old_key:
+                return new_key
+            prefix = f"{old_key}{CATEGORY_PATH_SEP}"
+            if key.startswith(prefix):
+                return new_key + key[len(old_key):]
+            return key
+
+        order = self.category_order()
+        for section in ("categories", "folder", "tree"):
+            section_map = order.get(section, {})
+            if not isinstance(section_map, dict):
+                continue
+            remapped = {}
+            for key, value in section_map.items():
+                remapped[remap_key(str(key))] = value
+            order[section] = remapped
+        parent_key = self.category_path_key(old_path[:-1])
+        siblings = order.get("categories", {}).get(parent_key)
+        if isinstance(siblings, list):
+            order["categories"][parent_key] = [new_name if name == old_name else name for name in siblings]
+        tree_siblings = order.get("tree", {}).get(parent_key)
+        if isinstance(tree_siblings, list):
+            for entry in tree_siblings:
+                if isinstance(entry, dict) and entry.get("type") == "category" and entry.get("name") == old_name:
+                    entry["name"] = new_name
+        self.settings["category_order"] = order
+
+        checks = self.category_check_states()
+        remapped_checks = {}
+        for key, value in checks.items():
+            remapped_checks[remap_key(str(key))] = value
+        self.settings["category_check_states"] = remapped_checks
+
+        paths = self.category_folder_paths()
+        remapped_paths = {}
+        for key, value in paths.items():
+            remapped_paths[remap_key(str(key))] = value
+        self.settings["category_folder_paths"] = remapped_paths
+
+        archived = [
+            self.replace_category_prefix(path, old_path, new_path)
+            for path in self.archived_categories()
+        ]
+        self.save_archived_categories(archived)
+        save_settings(self.settings)
+
     def category_check_states(self) -> Dict[str, bool]:
         checks = self.settings.get("category_check_states")
         if not isinstance(checks, dict):
@@ -1909,6 +2036,54 @@ class MainWindow(QMainWindow):
         if self.current_folder and os.path.normcase(self.current_folder["path"]) == os.path.normcase(old_path):
             self.current_folder = {"name": name, "path": new_path}
             self.refresh_files_table()
+        self.info("更新しました。")
+
+    def edit_category_path(self, path: List[str]):
+        if not path:
+            self.warn("カテゴリが見つかりません。")
+            return
+        initial_name = path[-1]
+        initial_folder_path = self.category_folder_path_for_path(path)
+        dlg = CategoryEditDialog(self, initial_name=initial_name, initial_path=initial_folder_path)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        new_name, folder_path = dlg.get_values()
+        if not new_name:
+            self.warn("カテゴリ名を入力してください。")
+            return
+        if folder_path and not os.path.isdir(folder_path):
+            self.warn("フォルダが存在しません。")
+            return
+        parent_path = path[:-1]
+        root = self.build_category_tree_root()
+        node = root
+        for part in parent_path:
+            node = node["children"].get(part, {"children": {}})
+        sibling_names = set(node.get("children", {}).keys())
+        if new_name != initial_name and new_name in sibling_names:
+            self.warn("同じ階層に同名のカテゴリがあります。")
+            return
+        new_path = parent_path + [new_name]
+        registry_changed = False
+        if new_path != path:
+            for item in self.registry:
+                categories = categories_from_item(item)
+                if categories[:len(path)] == path:
+                    item["categories"] = self.replace_category_prefix(categories, path, new_path)
+                    registry_changed = True
+            if registry_changed:
+                save_registry(self.registry)
+            self.rename_category_in_settings(path, new_path)
+            if self.selected_category_path[:len(path)] == path:
+                self.selected_category_path = self.replace_category_prefix(
+                    self.selected_category_path,
+                    path,
+                    new_path,
+                )
+        self.set_category_folder_path(new_path, folder_path)
+        self.refresh_folder_table()
+        self.refresh_category_tree()
+        self.refresh_files_table()
         self.info("更新しました。")
 
     def delete_registered_folder(self, path: str):
@@ -2230,9 +2405,13 @@ class MainWindow(QMainWindow):
             def add_category(name: str) -> None:
                 nonlocal has_unchecked
                 child_node = node["children"][name]
-                child_item = QTreeWidgetItem([f"🔖 {name}"])
                 child_path = path + [name]
+                folder_path = self.category_folder_path_for_path(child_path)
+                icon_prefix = "📁 " if folder_path else "🔖 "
+                child_item = QTreeWidgetItem([f"{icon_prefix}{name}"])
                 child_item.setData(0, Qt.UserRole, {"type": "category", "path": child_path})
+                if folder_path:
+                    child_item.setToolTip(0, folder_path)
                 child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable)
                 child_checked = self.is_category_checked(child_path)
                 child_item.setCheckState(0, Qt.Checked if child_checked else Qt.Unchecked)
@@ -2631,11 +2810,12 @@ class MainWindow(QMainWindow):
         if item_type == "category":
             act_register = menu.addAction("登録")
             act_batch_register = menu.addAction("一括登録")
+            act_edit = menu.addAction("編集")
             act_delete = menu.addAction("削除")
             act_archive = menu.addAction("アーカイブ")
         elif item_type == "folder":
             act_edit = menu.addAction("編集")
-            act_register_as_category = menu.addAction("カテゴリとして登録")
+            act_register_as_category = menu.addAction("下位フォルダを登録")
             act_delete = menu.addAction("削除")
         else:
             return
@@ -2654,11 +2834,16 @@ class MainWindow(QMainWindow):
                 initial_categories = []
             self.on_batch_register_for_category(initial_categories)
         elif action == act_edit:
-            path = data.get("path")
-            if not isinstance(path, str):
-                path = item.toolTip(0)
-            if path:
-                self.edit_registered_folder(path)
+            if item_type == "category":
+                category_path = data.get("path", [])
+                if isinstance(category_path, list):
+                    self.edit_category_path(category_path)
+            else:
+                path = data.get("path")
+                if not isinstance(path, str):
+                    path = item.toolTip(0)
+                if path:
+                    self.edit_registered_folder(path)
         elif action == act_register_as_category:
             root_path = data.get("path")
             category_path = data.get("category_path", [])
@@ -2722,6 +2907,7 @@ class MainWindow(QMainWindow):
                 folder_name = self.strip_icon_prefix(item.text(0).strip())
             if not folder_name:
                 folder_name = self.root_category_name(root_path)
+            category_folder_path = root_path
             order = self.category_order()
             key = self.category_path_key(category_path)
             folder_order = order.get("folder", {}).get(key, [])
@@ -2751,6 +2937,8 @@ class MainWindow(QMainWindow):
                 order["tree"][key] = updated_tree
             self.settings["category_order"] = order
             save_settings(self.settings)
+            new_category_path = normalize_category_path(category_path + [folder_name])
+            self.set_category_folder_path(new_category_path, category_folder_path)
             self.refresh_folder_table()
             self.refresh_category_tree()
             self.refresh_files_table()
@@ -3078,7 +3266,9 @@ class MainWindow(QMainWindow):
             return
         root_path = dlg.get_path()
         max_depth = dlg.get_depth()
-        self.run_batch_register(root_path, max_depth, base_categories=category_path)
+        if self.run_batch_register(root_path, max_depth, base_categories=category_path):
+            self.set_category_folder_path(category_path, root_path)
+            self.refresh_category_tree()
 
     def on_edit_selected_folder(self):
         idx = self.selected_folder_index()
