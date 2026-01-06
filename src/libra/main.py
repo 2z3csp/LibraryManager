@@ -1453,6 +1453,9 @@ class MainWindow(QMainWindow):
         act_archive = QAction("アーカイブ", self)
         act_archive.triggered.connect(self.on_archive)
         toolbar.addAction(act_archive)
+        act_cache_clear = QAction("キャッシュクリア", self)
+        act_cache_clear.triggered.connect(self.on_cache_clear)
+        toolbar.addAction(act_cache_clear)
 
         # Top controls
         top = QHBoxLayout()
@@ -2073,6 +2076,62 @@ class MainWindow(QMainWindow):
         self.settings["category_check_states"] = remaining_checks
         save_settings(self.settings)
         return removed_paths
+
+    def clear_unused_cache(self) -> Tuple[int, int]:
+        registry_paths = {
+            self.folder_key(item["path"])
+            for item in self.registry
+            if isinstance(item.get("path"), str)
+        }
+        category_paths = set()
+        for item in self.registry:
+            categories = self.category_path_for_item(item)
+            for i in range(1, len(categories) + 1):
+                category_paths.add(self.category_path_key(categories[:i]))
+        category_folder_paths = self.category_folder_paths()
+        for key in category_folder_paths.keys():
+            category_paths.add(str(key))
+        folder_paths = set(registry_paths)
+        for folder_path in category_folder_paths.values():
+            if isinstance(folder_path, str):
+                folder_paths.add(self.folder_key(folder_path))
+
+        settings_removed = 0
+        checks = self.category_check_states()
+        filtered_checks = {k: v for k, v in checks.items() if k in category_paths}
+        settings_removed += len(checks) - len(filtered_checks)
+        self.settings["category_check_states"] = filtered_checks
+
+        folder_checks = self.folder_tree_check_states()
+        filtered_folder_checks = {k: v for k, v in folder_checks.items() if k in folder_paths}
+        settings_removed += len(folder_checks) - len(filtered_folder_checks)
+        self.settings["folder_tree_check_states"] = filtered_folder_checks
+
+        counts = self.folder_subfolder_counts()
+        filtered_counts = {k: v for k, v in counts.items() if k in folder_paths}
+        settings_removed += len(counts) - len(filtered_counts)
+        self.settings["folder_subfolder_counts"] = filtered_counts
+
+        ignored = self.ignored_scan_paths()
+        filtered_ignored = sorted(path for path in ignored if path in folder_paths)
+        settings_removed += len(ignored) - len(filtered_ignored)
+        self.settings["ignored_scan_paths"] = filtered_ignored
+
+        paths = self.category_folder_paths()
+        filtered_paths = {k: v for k, v in paths.items() if k in category_paths}
+        settings_removed += len(paths) - len(filtered_paths)
+        self.settings["category_folder_paths"] = filtered_paths
+
+        save_settings(self.settings)
+
+        user_checks_removed = 0
+        folder_checks = self.user_checks
+        filtered_user_checks = {k: v for k, v in folder_checks.items() if k in folder_paths}
+        user_checks_removed = len(folder_checks) - len(filtered_user_checks)
+        self.user_checks = filtered_user_checks
+        save_user_checks(self.user_checks)
+
+        return settings_removed, user_checks_removed
 
     def preview_subfolder_counts(self, root_path: str, items: List[Dict[str, Any]]) -> Dict[str, int]:
         child_map: Dict[str, set[str]] = {}
@@ -3713,6 +3772,15 @@ class MainWindow(QMainWindow):
         dlg = ArchiveDialog(entries, self)
         if dlg.exec() != QDialog.Accepted:
             return
+
+    def on_cache_clear(self):
+        if not self.ask("未使用のキャッシュデータを削除しますか？"):
+            return
+        settings_removed, user_checks_removed = self.clear_unused_cache()
+        self.refresh_folder_table()
+        self.refresh_category_tree()
+        self.refresh_files_table()
+        self.info(f"キャッシュクリアが完了しました。settings: {settings_removed}件, user_checks: {user_checks_removed}件")
         action = dlg.selected_action
         path = dlg.selected_path()
         if not path:
