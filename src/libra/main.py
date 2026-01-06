@@ -2088,11 +2088,14 @@ class MainWindow(QMainWindow):
             categories = self.category_path_for_item(item)
             for i in range(1, len(categories) + 1):
                 category_paths.add(self.category_path_key(categories[:i]))
-        category_folder_paths = self.category_folder_paths()
-        for key in category_folder_paths.keys():
-            category_paths.add(str(key))
         folder_paths = set(registry_paths)
-        for folder_path in category_folder_paths.values():
+        category_folder_paths = self.category_folder_paths()
+        filtered_category_folder_paths = {
+            key: value
+            for key, value in category_folder_paths.items()
+            if key in category_paths
+        }
+        for folder_path in filtered_category_folder_paths.values():
             if isinstance(folder_path, str):
                 folder_paths.add(self.folder_key(folder_path))
 
@@ -2117,10 +2120,8 @@ class MainWindow(QMainWindow):
         settings_removed += len(ignored) - len(filtered_ignored)
         self.settings["ignored_scan_paths"] = filtered_ignored
 
-        paths = self.category_folder_paths()
-        filtered_paths = {k: v for k, v in paths.items() if k in category_paths}
-        settings_removed += len(paths) - len(filtered_paths)
-        self.settings["category_folder_paths"] = filtered_paths
+        settings_removed += len(category_folder_paths) - len(filtered_category_folder_paths)
+        self.settings["category_folder_paths"] = filtered_category_folder_paths
 
         save_settings(self.settings)
 
