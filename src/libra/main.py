@@ -2382,12 +2382,12 @@ class MainWindow(QMainWindow):
         self.refresh_files_table()
         self.info("更新しました。")
 
-    def delete_registered_folder(self, path: str):
+    def delete_registered_folder(self, path: str, confirm: bool = True):
         idx = self.registry_index_by_path(path)
         if idx < 0:
             self.warn("登録情報が見つかりません。")
             return
-        if not self.ask("この登録を削除しますか？（_History/メタデータ は削除しません）"):
+        if confirm and not self.ask("この登録を削除しますか？（_History/メタデータ は削除しません）"):
             return
         self.registry.pop(idx)
         save_registry(self.registry)
@@ -2408,15 +2408,17 @@ class MainWindow(QMainWindow):
             item for item in self.registry
             if self.category_path_for_item(item)[:len(path)] == path
         ]
-        if not targets:
-            self.warn("削除できる登録がありません。")
-            return
-        if not self.ask(f"カテゴリ配下の登録 {len(targets)} 件を削除しますか？"):
-            return
+        if targets:
+            if not self.ask(f"カテゴリ配下の登録 {len(targets)} 件を削除しますか？"):
+                return
+        else:
+            if not self.ask("このカテゴリを削除しますか？"):
+                return
         target_paths = {item["path"] for item in targets}
         self.registry = [item for item in self.registry if item["path"] not in target_paths]
-        self.remove_folder_settings_for_paths(list(target_paths))
-        self.remove_user_checks_for_paths(target_paths)
+        if target_paths:
+            self.remove_folder_settings_for_paths(list(target_paths))
+            self.remove_user_checks_for_paths(target_paths)
         self.remove_archived_under_path(path)
         removed_category_paths = self.remove_category_settings_under_path(path)
         self.remove_folder_settings_for_paths(removed_category_paths)
@@ -3097,8 +3099,11 @@ class MainWindow(QMainWindow):
         collapsed_categories = self.collapse_category_paths(category_paths)
         for path in collapsed_categories:
             self.delete_category_hierarchy(path)
-        for path in folder_paths:
-            self.delete_registered_folder(path)
+        if folder_paths:
+            if not self.ask(f"{len(folder_paths)} 件の登録を削除しますか？（_History/メタデータ は削除しません）"):
+                return
+            for path in folder_paths:
+                self.delete_registered_folder(path, confirm=False)
 
     def on_category_tree_context_menu(self, pos):
         item = self.category_tree.itemAt(pos)
