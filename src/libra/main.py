@@ -1,7 +1,7 @@
 # library_manager_mock.py
 # PySide6 mock for folder-based document versioning on OneDrive-synced folders.
 # - Register folders (G1)
-# - Show registered folders list (G0): name/link, latest rev, last edited date, editor
+# - Show registered folders list (G0): name, last edited date
 # - Show files in selected folder
 # - Update (create next rev, move old to _History, write metadata + memo)
 # - Replace (take external file, store as next rev, move old to _History, write metadata + memo)
