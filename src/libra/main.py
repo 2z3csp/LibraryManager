@@ -3597,7 +3597,14 @@ class MainWindow(QMainWindow):
             return
         root_path = dlg.get_path()
         max_depth = dlg.get_depth()
-        self.run_batch_register(root_path, max_depth)
+        if not self.run_batch_register(root_path, max_depth):
+            return
+        root_category = self.root_category_name(root_path)
+        if root_category:
+            category_path = [root_category]
+            if not self.category_folder_path_for_path(category_path):
+                self.set_category_folder_path(category_path, root_path)
+                self.refresh_category_tree()
 
     def run_batch_register(
         self,
