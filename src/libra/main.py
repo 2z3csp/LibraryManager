@@ -1569,7 +1569,7 @@ class MainWindow(QMainWindow):
         btn_replace = QPushButton("差し替え")
         btn_replace.clicked.connect(self.on_replace)
 
-        btn_view = QPushButton("観覧")
+        btn_view = QPushButton("閲覧")
         btn_view.clicked.connect(self.on_view)
 
         files_button_row = QHBoxLayout()
