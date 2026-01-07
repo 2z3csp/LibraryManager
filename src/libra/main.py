@@ -2119,17 +2119,17 @@ class MainWindow(QMainWindow):
         return settings_removed, user_checks_removed
 
     def preview_subfolder_counts(self, root_path: str, items: List[Dict[str, Any]]) -> Dict[str, int]:
-        child_map: Dict[str, set[str]] = {}
-        for entry in items:
-            parts = entry.get("rel_parts", [])
-            if not isinstance(parts, list) or not parts:
-                continue
-            parent = root_path
-            child_map.setdefault(parent, set()).add(parts[0])
-            for idx in range(1, len(parts)):
-                parent = os.path.join(root_path, *parts[:idx])
-                child_map.setdefault(parent, set()).add(parts[idx])
-        return {path: len(children) for path, children in child_map.items()}
+        paths = {
+            entry.get("path")
+            for entry in items
+            if isinstance(entry.get("path"), str)
+        }
+        paths.add(root_path)
+        counts: Dict[str, int] = {}
+        for path in paths:
+            if isinstance(path, str) and path:
+                counts[path] = self.count_immediate_subfolders(path)
+        return counts
 
     def detect_new_subfolders(self) -> set[str]:
         counts = self.folder_subfolder_counts()
