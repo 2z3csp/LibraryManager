@@ -4155,6 +4155,15 @@ class MainWindow(QMainWindow):
         if not isinstance(history_items, list) or not history_items:
             self.warn("削除できる履歴がありません。")
             return
+        history_dir = ensure_history_dir(folder_path)
+        history_items = [
+            item for item in history_items
+            if isinstance(item, dict) and item.get("file")
+            and os.path.exists(os.path.join(history_dir, item.get("file", "")))
+        ]
+        if not history_items:
+            self.warn("削除できる履歴がありません。")
+            return
 
         dlg = HistoryClearDialog(history_items, info.get("current_rev", ""), self)
         if dlg.exec() != QDialog.Accepted:
@@ -4164,7 +4173,6 @@ class MainWindow(QMainWindow):
             self.warn("削除対象が選択されていません。")
             return
 
-        history_dir = ensure_history_dir(folder_path)
         deleted_files = set()
         errors = []
         for item in selected_items:
@@ -4180,17 +4188,7 @@ class MainWindow(QMainWindow):
                 errors.append(f"{fname}: {e}")
 
         if deleted_files:
-            meta = load_meta(folder_path)
-            docs = meta.get("documents", {})
-            d = docs.get(doc_key, {})
-            if isinstance(d, dict):
-                history_list = d.get("history", [])
-                if isinstance(history_list, list):
-                    d["history"] = [h for h in history_list if h.get("file") not in deleted_files]
-                docs[doc_key] = d
-                meta["documents"] = docs
-                save_meta(folder_path, meta)
-                self.refresh_right_pane_for_doc(doc_key)
+            self.refresh_right_pane_for_doc(doc_key)
 
         if errors:
             self.warn("削除時に一部エラーが発生しました:\n" + "\n".join(errors))
