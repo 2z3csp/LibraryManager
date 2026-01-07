@@ -1756,6 +1756,7 @@ class MainWindow(QMainWindow):
     ) -> List[Dict[str, Any]]:
         base_categories = base_categories or []
         root_category = self.root_category_name(root_path)
+        include_root_category = not (base_categories and base_categories[-1] == root_category)
         registered_paths = {os.path.normcase(item["path"]) for item in self.registry}
         items: List[Dict[str, Any]] = []
         for dirpath, dirnames, _filenames in os.walk(root_path):
@@ -1773,12 +1774,13 @@ class MainWindow(QMainWindow):
             if os.path.normcase(dirpath) in registered_paths:
                 continue
             rel_parts = [] if rel == "." else rel.split(os.sep)
+            base_parts = base_categories + [root_category] if include_root_category else list(base_categories)
             if rel_parts:
                 folder_name = rel_parts[-1]
-                category_parts = base_categories + [root_category] + rel_parts[:-1]
+                category_parts = base_parts + rel_parts[:-1]
             else:
                 folder_name = root_category
-                category_parts = base_categories + [root_category]
+                category_parts = base_parts
             categories = normalize_category_path(category_parts)
             items.append({
                 "name": folder_name,
